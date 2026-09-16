@@ -327,7 +327,7 @@ class SetNvsStep extends FlashStep {
   }
 
   List<NvsEdit> get edits => [
-        for (final e in set.entries) parseNvsSetSpec('${e.key}=${e.value}'),
+        for (final e in set.entries) parseNvsManifestEntry(e.key, e.value),
         for (final d in delete) parseNvsDeleteSpec(d),
       ];
   @override

@@ -105,6 +105,25 @@ NvsEdit parseNvsSetSpec(String spec, {String? defaultNamespace, Uint8List? Funct
   return NvsEdit(namespace, key, type: type, value: value);
 }
 
+/// Parse one entry of a manifest `set-nvs` map — `ns:key` → `type:value`, or
+/// a bare value when the key already exists in the image — into an edit.
+///
+/// The type rides on the value here, not on the key as it does in a CLI spec:
+/// a manifest's keys are the identity of the entry, so `{"oem:logo": "u32:1"}`
+/// reads better than `{"oem:logo:u32": "1"}`. Both are accepted; the value's
+/// prefix is only taken as a type when it names one, so a string whose text
+/// happens to contain a colon still works untyped.
+NvsEdit parseNvsManifestEntry(String qualified, String value) {
+  final colon = value.indexOf(':');
+  final typed = colon > 0 && NvsType.fromLabel(value.substring(0, colon)) != null;
+  // `ns:key:type` and a typed value together would be two types; let the CLI
+  // grammar reject that rather than silently preferring one.
+  final spec = typed && qualified.split(':').length < 3
+      ? '$qualified:${value.substring(0, colon)}=${value.substring(colon + 1)}'
+      : '$qualified=$value';
+  return parseNvsSetSpec(spec);
+}
+
 /// Parse a `namespace:key` (or, with a default namespace, `key`) into the two
 /// parts.
 (String namespace, String key) parseNvsKeySpec(String spec, {String? defaultNamespace, String what = ''}) {

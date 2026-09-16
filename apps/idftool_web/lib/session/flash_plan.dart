@@ -56,7 +56,7 @@ class NvsPlan {
   int get length => set.length + delete.length;
 
   List<NvsEdit> get edits => [
-        for (final e in set.entries) parseNvsSetSpec('${e.key}=${e.value}'),
+        for (final e in set.entries) parseNvsManifestEntry(e.key, e.value),
         for (final d in delete) parseNvsDeleteSpec(d),
       ];
 

@@ -46,6 +46,29 @@ void main() {
     expect(FlashManifest.fromJson(m.toJson()).toJson(), m.toJson());
   });
 
+  test('set-nvs takes the type from the value, the key, or the image', () {
+    SetNvsStep step(Map<String, String> set) => FlashManifest.fromJson({
+          'name': 'x',
+          'ops': [{'op': 'set-nvs', 'partition': 'nvs', 'set': set}],
+        }).ops.single as SetNvsStep;
+
+    // `ns:key` -> `type:value` is the form the flasher writes into a bundle.
+    final typedValue = step({'oem:logo': 'u32:1'}).edits.single;
+    expect((typedValue.namespace, typedValue.key, typedValue.type, typedValue.value), ('oem', 'logo', NvsType.u32, 1));
+    // The CLI's `ns:key:type` = value works too.
+    final typedKey = step({'oem:logo:u32': '1'}).edits.single;
+    expect((typedKey.namespace, typedKey.key, typedKey.type, typedKey.value), ('oem', 'logo', NvsType.u32, 1));
+    // No type anywhere: left to resolve against the entry being replaced.
+    final untyped = step({'oem:logo': '1'}).edits.single;
+    expect((untyped.type, untyped.value), (null, '1'));
+    // A value that merely contains a colon is not a type.
+    final url = step({'cfg:url': 'https://x.example/a'}).edits.single;
+    expect((url.type, url.value), (null, 'https://x.example/a'));
+    expect(step({'cfg:channel': 'string:stable'}).edits.single.value, 'stable');
+    // Two types is a mistake worth reporting, not one to guess at.
+    expect(() => step({'oem:logo:u32': 'u32:1'}).edits, throwsA(isA<NvsError>()));
+  });
+
   test('rejects bad manifests with the step number', () {
     expect(() => FlashManifest.fromJson({'name': 'x', 'steps': []}), throwsA(isA<IdfToolException>()));
     expect(() => FlashManifest.fromJson({'name': 'x', 'chip': 'esp99', 'steps': [{'op': 'clear-boot'}]}),

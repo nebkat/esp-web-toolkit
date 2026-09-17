@@ -31,6 +31,18 @@
 
   <title>ESP Web Toolkit</title>
   <link rel="manifest" href="manifest.json">
+
+  <!--
+    GitHub Pages has no rewrites: a deep link such as /v1.2.3/oneclick?bundle=…
+    is served the site's 404.html, which sends it here as ?p=/oneclick?bundle=….
+    Put the route back before the app reads the URL.
+  -->
+  <script>
+    (function () {
+      var p = new URLSearchParams(location.search).get('p');
+      if (p !== null) history.replaceState(null, '', document.baseURI.replace(/\/$/, '') + p + location.hash);
+    })();
+  </script>
 </head>
 <body>
   <!--

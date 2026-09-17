@@ -1,49 +1,77 @@
-# Publishes apps/idftool_web to GitHub Pages on every push to main.
+# Publishes a version of apps/idftool_web to GitHub Pages when it is tagged
+# idftool_web-v<version>: the app is built with base href /<repo>/v<version>/
+# and committed to the gh-pages branch as that folder, next to every earlier
+# version. A published version is never replaced, so a link to it keeps
+# working however later versions behave.
 #
-# The app is static: Web Serial needs HTTPS, which Pages provides, and the
-# one-click flasher at `/oneclick?bundle=<url>` fetches bundles from wherever
-# that points (that host needs CORS), so no firmware lives here.
+# CanvasKit and the fallback fonts load from Google's CDN (Flutter's default),
+# so the canvaskit/ folder of the build is not published.
+#
+# The branch root holds apps/idftool_web/pages: 404.html sends deep links
+# (/v1.2.3/oneclick) to their version, and links from before versions to
+# the version they were made with.
 name: Pages
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
-
-permissions:
-  contents: read
-  pages: write
-  id-token: write
+    tags: ['idftool_web-v*']
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - id: version
+        name: Version and Flutter from the repository
+        run: |
+          version="v${GITHUB_REF_NAME#idftool_web-v}"
+          pubspec="v$(sed -n 's/^version: *\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' apps/idftool_web/pubspec.yaml)"
+          if [ "$version" != "$pubspec" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match apps/idftool_web/pubspec.yaml ($pubspec)"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "flutter=$(jq -r .flutter .fvmrc)" >> "$GITHUB_OUTPUT"
+
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: 3.47.2
+          flutter-version: ${{ steps.version.outputs.flutter }}
           cache: true
-      - run: flutter pub get
-      # Served under /<repo>/, so the base href must match.
-      - run: flutter build web --release --base-href "/${GITHUB_REPOSITORY#*/}/"
-        working-directory: apps/idftool_web
-      # Pages has no rewrite rules; a 404 that is the app keeps deep links working.
-      - run: cp apps/idftool_web/build/web/index.html apps/idftool_web/build/web/404.html
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: apps/idftool_web/build/web
 
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - id: deployment
-        uses: actions/deploy-pages@v4
+      - run: flutter pub get
+
+      - run: flutter build web --release --web-resources-cdn --base-href "/${GITHUB_REPOSITORY#*/}/${{ steps.version.outputs.version }}/"
+        working-directory: apps/idftool_web
+
+      - name: Publish to gh-pages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          site="$RUNNER_TEMP/site"
+          if git fetch --depth=1 origin gh-pages:gh-pages; then
+            git worktree add "$site" gh-pages
+          else
+            git worktree add --orphan -b gh-pages "$site"
+          fi
+          if [ -e "$site/$VERSION" ]; then
+            echo "::error::$VERSION is already published"
+            exit 1
+          fi
+          cp -R apps/idftool_web/build/web "$site/$VERSION"
+          rm -rf "$site/$VERSION/canvaskit"
+          cp apps/idftool_web/pages/index.html apps/idftool_web/pages/404.html "$site/"
+          touch "$site/.nojekyll"
+          cd "$site"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m "Publish $VERSION"
+          git push origin gh-pages

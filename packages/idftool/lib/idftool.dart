@@ -17,3 +17,4 @@ export 'src/partition_slice.dart';
 export 'src/partition_table.dart';
 export 'src/partition_table_files.dart';
 export 'src/report.dart';
+export 'src/table_check.dart';

@@ -7,7 +7,7 @@ import 'device.dart';
 import 'flash/differential.dart';
 import 'nvs/nvs.dart';
 import 'partition_table.dart';
-import 'partition_table_files.dart';
+import 'table_check.dart';
 
 /// The optional `manifest.json` of a bundle: a name, description and target
 /// chip, plus what the filename convention (see `bundle.dart`) cannot say, as
@@ -18,12 +18,22 @@ import 'partition_table_files.dart';
 ///   "name": "MS5 v0.17.0",
 ///   "description": "Field update: new app, reset the channel",
 ///   "chip": "esp32s3",
+///   "table": "ask",
+///   "tableMatch": "used",
 ///   "ops": [
 ///     {"op": "set-nvs", "partition": "nvs_cfg", "set": {"cfg:channel": "string:stable"}},
 ///     {"op": "clear-boot"}
 ///   ]
 /// }
 /// ```
+///
+/// `table` says what to do when the bundle's `partition_table.csv` differs
+/// from the device's: `update` it (the default), `ask` the person flashing,
+/// or `require` a compatible device and never write it (see [TablePolicy]).
+/// `tableMatch` says what compatible means: the `exact` layout (the
+/// default), or only the partitions the bundle `used` (see [TableMatch]),
+/// in which case the device's own layout may be kept. A table that already
+/// matches is not written either way.
 ///
 /// Ops map onto [IdfDevice]: `write` (`partition`, `file`), `erase`
 /// (`partition`), `set-nvs` (`partition`, `set` map of `ns:key` →
@@ -33,7 +43,7 @@ import 'partition_table_files.dart';
 /// `clear-boot`. The table, bootloader and app are files, never ops. The
 /// same ZIP is what the python single-use executables consume.
 class FlashManifest {
-  const FlashManifest({this.name, this.description, this.chip, this.ops = const []});
+  const FlashManifest({this.name, this.description, this.chip, this.tablePolicy, this.tableMatch, this.ops = const []});
 
   final String? name;
   final String? description;
@@ -41,6 +51,14 @@ class FlashManifest {
   /// The chip the bundle targets (e.g. `esp32s3`); checked against the
   /// connected device before anything is written. `null` skips the check.
   final EspChip? chip;
+
+  /// What to do when the bundle's table differs from the device's; `null`
+  /// means [TablePolicy.update].
+  final TablePolicy? tablePolicy;
+
+  /// Which differences from the device's table matter; `null` means
+  /// [TableMatch.exact].
+  final TableMatch? tableMatch;
 
   /// Run after the file operations.
   final List<FlashStep> ops;
@@ -57,7 +75,19 @@ class FlashManifest {
       chip = EspChip.values.where((c) => c.name.toLowerCase().replaceAll('-', '') == chipName.toLowerCase().replaceAll('-', '')).firstOrNull;
       if (chip == null) throw IdfToolException("manifest.json: unknown chip '$chipName'");
     }
-    return FlashManifest(name: name as String?, description: json['description'] as String?, chip: chip, ops: _ops(json));
+    final TablePolicy? tablePolicy;
+    final TableMatch? tableMatch;
+    try {
+      tablePolicy = json['table'] == null ? null : TablePolicy.parse(json['table']);
+    } on IdfToolException catch (e) {
+      throw IdfToolException('manifest.json: "table": ${e.message}');
+    }
+    try {
+      tableMatch = json['tableMatch'] == null ? null : TableMatch.parse(json['tableMatch']);
+    } on IdfToolException catch (e) {
+      throw IdfToolException('manifest.json: "tableMatch": ${e.message}');
+    }
+    return FlashManifest(name: name as String?, description: json['description'] as String?, chip: chip, tablePolicy: tablePolicy, tableMatch: tableMatch, ops: _ops(json));
   }
 
   static List<FlashStep> _ops(Map<String, dynamic> json) {
@@ -81,6 +111,8 @@ class FlashManifest {
         if (name != null) 'name': name,
         if (description != null) 'description': description,
         if (chip != null) 'chip': chip!.name.toLowerCase().replaceAll('-', ''),
+        if (tablePolicy != null) 'table': tablePolicy!.keyword,
+        if (tableMatch != null) 'tableMatch': tableMatch!.keyword,
         if (ops.isNotEmpty) 'ops': [for (final s in ops) s.toJson()],
       };
 }
@@ -159,12 +191,19 @@ class OtaStep extends FlashStep {
 }
 
 class WriteTableStep extends FlashStep {
-  const WriteTableStep(this.file);
+  const WriteTableStep(this.file, {this.policy = TablePolicy.update});
   final String file;
+
+  /// What to do when the device's table differs (one that matches is left alone).
+  final TablePolicy policy;
   @override
   String get op => 'write-table';
   @override
-  String describe() => 'Replace the partition table with $file';
+  String describe() => switch (policy) {
+        TablePolicy.update => 'Replace the partition table with $file if it differs',
+        TablePolicy.ask => 'Replace the partition table with $file if it differs, once agreed',
+        TablePolicy.require => 'Require the partition table in $file',
+      };
   @override
   List<String> get files => [file];
   @override
@@ -343,7 +382,7 @@ class FlashBundle {
     final contents = readBundle(zip, partitionTableOffset: partitionTableOffset, primaryBootloaderOffset: primaryBootloaderOffset);
     final manifest = contents.manifest;
     final steps = <FlashStep>[
-      if (contents.tableFile case final f?) WriteTableStep(f),
+      if (contents.tableFile case final f?) WriteTableStep(f, policy: manifest?.tablePolicy ?? TablePolicy.update),
       if (contents.bootloader != null) const WriteBootloaderStep('bootloader.bin'),
       if (contents.factoryApp != null) const FactoryStep('${bundleRolePrefix}factory.bin'),
       if (contents.otaApp != null) const OtaStep('${bundleRolePrefix}ota.bin'),
@@ -386,6 +425,14 @@ typedef FlashStepCallback = void Function(int index, FlashStep step);
 /// Run every step of [bundle] against [device], in order. Throws on the
 /// first failure; [onStep] fires as each step starts.
 ///
+/// Before anything is written the bundle is checked against the device's
+/// table ([checkBundle]): a partition it names that will not exist, or an
+/// incompatible table under [TablePolicy.require], stops it there. For a
+/// differing table under [TablePolicy.ask], [chooseTable] decides: update it,
+/// keep the device's (where [BundleCheck.canKeepLayout]), or `null` to flash
+/// nothing (as without a callback). A table that already matches, or one
+/// that is kept, is not written.
+///
 /// [nvsKeys] decrypt and re-encrypt the partition for `set-nvs` steps on an
 /// encrypted NVS partition. Keys never come from the bundle itself.
 Future<void> runFlashBundle(
@@ -396,9 +443,16 @@ Future<void> runFlashBundle(
   WriteStrategy strategy = WriteStrategy.differential,
   NvsKeys? nvsKeys,
   void Function(String message)? log,
+  Future<TableChoice?> Function(BundleCheck check)? chooseTable,
 }) async {
   if (bundle.chip != null && device.chip != bundle.chip) {
     throw IdfToolException('This bundle is for ${bundle.chip!.name}, but the connected device is a ${device.chip.name}');
+  }
+  final check = checkBundle(bundle, await readDeviceTable(device));
+  if (check.blocker case final blocker?) throw IdfToolException(blocker);
+  final choice = check.automaticChoice ?? await chooseTable?.call(check);
+  if (choice == null || (choice == TableChoice.keep && check.tableChanges && !check.canKeepLayout)) {
+    throw IdfToolException("The device's partition layout differs and updating it was not agreed");
   }
   for (var i = 0; i < bundle.steps.length; i++) {
     final step = bundle.steps[i];
@@ -411,13 +465,16 @@ Future<void> runFlashBundle(
         final r = await device.ota(bundle.file(file), strategy: strategy, onProgress: onProgress);
         log?.call('${r.partition.name}: ${outcome(r.outcome)}; boot slot switched');
       case WriteTableStep(:final file):
-        final bytes = bundle.file(file);
-        final table = PartitionTable.isBinary(bytes)
-            ? PartitionTable.fromBinary(bytes)
-            : parsePartitionTableCsv(PartitionTable.decodeCsv(bytes),
-                source: file, partitionTableOffset: device.partitionTableOffset, primaryBootloaderOffset: device.primaryBootloaderOffset);
-        await device.writePartitionTable(table);
-        log?.call('partition table written');
+        final table = parsePartitionTable(bundle.file(file),
+            source: file, partitionTableOffset: device.partitionTableOffset, primaryBootloaderOffset: device.primaryBootloaderOffset);
+        if (check.tableMatches) {
+          log?.call('partition table already matches; not written');
+        } else if (choice == TableChoice.keep) {
+          log?.call("partition table differs outside this update's partitions; the device's is kept");
+        } else {
+          await device.writePartitionTable(table);
+          log?.call('partition table written');
+        }
       case WriteBootloaderStep(:final file):
         final entry = (await device.resolver()).bootloaderEntry ??
             (throw IdfToolException('The bootloader offset of ${device.chip.name} is not known'));

@@ -34,6 +34,19 @@ on https://github.com/nebkat/idftool; note the link here once filed.
   checked instead.
 - **Plain bundles addressed by name need a matching table.** Tools should
   say whether a bundle carries its own table or relies on the device's.
+- **A bundle's table is compared before it is written; `table` policy.**
+  Before anything is flashed, the bundle's `partition_table.csv` is compared
+  with the device's by partition name: if they match it is not written at
+  all. If they differ, `manifest.json`'s `"table"` decides: `"update"`
+  (default, today's behaviour) writes it, `"ask"` shows what differs and
+  writes it only if the person flashing agrees (declined, nothing is
+  flashed), `"require"` refuses the device. `"tableMatch"` says which
+  differences count: `"exact"` (default) any, `"used"` only those in
+  partitions the bundle writes, erases, edits or boots from. With `"used"`
+  and nothing used differing, `"ask"` also offers to keep the device's
+  layout and `"require"` flashes it as it is. Every partition a bundle names
+  is also resolved against the table it will meet before the first write,
+  so a missing name stops the flash up front rather than half-way.
 
 - **CLI `write-bundle` / `dump-bundle`** in the Dart port still use the
   plain name-based reader in `device.dart`; they should move to

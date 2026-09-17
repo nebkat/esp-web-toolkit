@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP Web Toolkit</title>
+  <!--
+    The site root (see 404.html): links from before versions open in LEGACY.
+    The oldest one-click links put the route in the fragment
+    (#/oneclick?bundle=…); they become the path form.
+  -->
+  <script>
+    var LEGACY = 'v0.1.0';
+    location.replace(location.hash.indexOf('#/') === 0
+      ? LEGACY + '/?p=' + encodeURIComponent(location.hash.slice(1))
+      : LEGACY + '/' + location.search + location.hash);
+  </script>
+</head>
+<body>
+  <p><a href="v0.1.0/">ESP Web Toolkit</a></p>
+</body>
+</html>

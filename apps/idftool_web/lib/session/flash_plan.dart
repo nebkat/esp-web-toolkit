@@ -753,9 +753,6 @@ class FlashPlan extends ChangeNotifier {
     if (bundle.manifest case final m?) {
       _bundleName = m.name;
       _bundleDescription = m.description;
-      if (m.isRecipe) {
-        notes.add('manifest.json is a recipe of ${m.steps.length} step(s), which is not applied here; the one-click page runs it');
-      }
       for (final op in m.ops) {
         switch (op) {
           case EraseStep(:final partition):

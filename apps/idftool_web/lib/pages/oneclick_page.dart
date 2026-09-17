@@ -11,8 +11,8 @@ import '../widgets/port_picker.dart';
 
 /// The one-click flasher at `/oneclick`: a bundle (from `?bundle=<url>` or a picked file),
 /// an outline of what it will do, Connect, Flash, done. Any bundle works —
-/// one by the filename convention, with or without a manifest of extras,
-/// or an older recipe manifest. The bundle's name and description are the
+/// one by the filename convention, with or without a manifest of extras.
+/// The bundle's name and description are the
 /// page's only heading. None of the tool's machinery is shown; the log
 /// stays behind a disclosure.
 class OneClickPage extends StatefulWidget {
@@ -373,7 +373,6 @@ class _OneClickPageState extends State<OneClickPage> {
         ),
       SetBootStep(:final partition) => (icon: Icons.restart_alt, name: partition, detail: offset(partition), summary: 'Boot from it next'),
       ClearBootStep() => (icon: Icons.restart_alt, name: 'otadata', detail: offset('otadata'), summary: 'Clear the OTA selection so the factory app boots'),
-      WriteBundleStep() => (icon: Icons.unarchive_outlined, name: 'bundle', detail: '', summary: step.describe()),
     };
   }
 

@@ -20,9 +20,11 @@ on https://github.com/nebkat/idftool; note the link here once filed.
 - **`manifest.json` as optional extras.** (nebkat/idftool#8) `name`, `description`, `chip` and
   an `ops` list for what a file cannot express: set/delete NVS keys in an
   existing partition, put/delete a file in a filesystem partition, erase a
-  partition, set/clear the boot slot. Ops run after the file operations. The
-  older `steps` form (a recipe naming its files, nothing derived from
-  filenames) keeps loading; a bundle with no extras has no manifest.
+  partition, set/clear the boot slot. Ops run after the file operations; a
+  bundle with no extras has no manifest. The table, bootloader and app are
+  only ever files, never ops (`write-table`, `write-bootloader`, `factory`,
+  `ota` and `write-bundle` are not ops). The short-lived `steps` recipe form
+  from the first one-click flasher is gone: no bundle producer used it.
   Whole-flash images are deliberately not a bundle concept. The Dart port
   (`FlashBundle.fromZip`, the one-click page) does all of this; single files
   are `edit-fs` (`partition`, `put` map of path → bundle file, `delete`

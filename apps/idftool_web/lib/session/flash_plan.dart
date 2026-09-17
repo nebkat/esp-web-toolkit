@@ -140,7 +140,7 @@ class FlashPlan extends ChangeNotifier {
 
   final _ops = <String, PlannedOp>{};
   final _manual = <ManualWrite>[];
-  FlashRole _appRole = FlashRole.ota;
+  FlashRole _appRole = FlashRole.factory;
   PickedFile? _app;
   String? _appWarningText;
 

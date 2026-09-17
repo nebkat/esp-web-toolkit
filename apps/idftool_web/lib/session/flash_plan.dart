@@ -135,6 +135,8 @@ class FlashPlan extends ChangeNotifier {
   String? _fileTableProblem;
   TableSource _tableSource = TableSource.device;
   TableUse _tableUse = TableUse.reference;
+  TablePolicy _tablePolicy = TablePolicy.update;
+  TableMatch _tableMatch = TableMatch.exact;
 
   final _ops = <String, PlannedOp>{};
   final _manual = <ManualWrite>[];
@@ -214,7 +216,7 @@ class FlashPlan extends ChangeNotifier {
     _deviceTable = table;
     _deviceApps = apps;
     _otadata = otadata;
-    final notes = _tableSource == TableSource.device ? _reconcile() : const <String>[];
+    final notes = _tableSource == TableSource.device || namesOnly ? _reconcile() : const <String>[];
     notifyListeners();
     return notes;
   }
@@ -225,6 +227,30 @@ class FlashPlan extends ChangeNotifier {
 
   TableSource get tableSource => _tableSource;
   TableUse get tableUse => _tableUse;
+
+  /// What a bundle of this plan does when its table differs from the
+  /// device's (only meaningful while the table is flashed).
+  TablePolicy get tablePolicy => _tablePolicy;
+
+  /// Which differences from a device's table the firmware can't live with.
+  TableMatch get tableMatch => _tableMatch;
+
+  /// A file's table used only for its names: writes land wherever the
+  /// device's table puts those names, so the file's offsets mean nothing.
+  bool get namesOnly => _tableSource == TableSource.file && _tableUse == TableUse.reference;
+
+  /// Whether the offsets shown are where writes will land: not for a file's
+  /// table used for names with no device table to take them from.
+  bool get offsetsKnown => !(namesOnly && _deviceTable == null);
+
+  /// How the table in use differs from the device's, or `null` when there
+  /// is nothing to compare (no table, or none read from the device). For
+  /// the device's own table this is always empty.
+  List<PartitionDifference>? get tableDifferences {
+    final t = table, device = _deviceTable;
+    if (t == null || device == null) return null;
+    return identical(t, device) ? const [] : comparePartitionTables(t, device);
+  }
 
   /// The table opened from a file, whether or not it is the source in use.
   PartitionTable? get fileTable => _fileTable;
@@ -276,8 +302,20 @@ class FlashPlan extends ChangeNotifier {
     return notes;
   }
 
-  void setTableUse(TableUse use) {
+  List<String> setTableUse(TableUse use) {
     _tableUse = use;
+    final notes = _reconcile();
+    notifyListeners();
+    return notes;
+  }
+
+  void setTablePolicy(TablePolicy policy) {
+    _tablePolicy = policy;
+    notifyListeners();
+  }
+
+  void setTableMatch(TableMatch match) {
+    _tableMatch = match;
     notifyListeners();
   }
 
@@ -308,8 +346,16 @@ class FlashPlan extends ChangeNotifier {
     }
     if (table == null) return 'No partition table: only the bootloader and the app can be planned until one is read from a device or opened.';
     final from = _tableSource == TableSource.file ? 'the table from $_fileTableSource' : "the device's table";
-    return _tableUse == TableUse.flash
-        ? 'Partitions are named against $from, which is written first and included in the bundle.'
+    if (_tableUse == TableUse.flash) {
+      final ifDifferent = switch (_tablePolicy) {
+        TablePolicy.update => 'written first if the device\'s differs',
+        TablePolicy.ask => 'written first if the device\'s differs and the user agrees',
+        TablePolicy.require => 'required to match the device\'s already',
+      };
+      return 'Partitions are named against $from, which is included in the bundle and $ifDifferent.';
+    }
+    return namesOnly
+        ? 'Partitions are named after $from, but land wherever the device\'s own table puts those names; a bundle of this plan carries no table.'
         : 'Partitions are named against $from for reference only; a bundle of this plan carries no table and needs a device with these names.';
   }
 
@@ -319,9 +365,12 @@ class FlashPlan extends ChangeNotifier {
 
   /// The real partitions of [table], excluding any bootloader or
   /// partition-table rows it lists (those have boxes of their own).
+  ///
+  /// A file's table used for names only takes each row's geometry from the
+  /// device's table when there is one, since that is where it will land.
   List<PartitionDefinition> get partitionRows => [
         for (final p in table ?? const <PartitionDefinition>[])
-          if (!p.isPrimaryBootloader && !p.isPrimaryPartitionTable) p
+          if (!p.isPrimaryBootloader && !p.isPrimaryPartitionTable) (namesOnly ? _deviceTable?.findByName(p.name) : null) ?? p
       ];
 
   /// The virtual bootloader row for the current chip, if known.
@@ -593,6 +642,9 @@ class FlashPlan extends ChangeNotifier {
   // Whole plan
   // --------------------------------------------------------------------------
 
+  /// The staged table and the device's are the same: flashing skips it.
+  bool get stagedTableMatches => stagedTable != null && (tableDifferences?.isEmpty ?? false);
+
   bool get isEmpty => stagedTable == null && _ops.isEmpty && _manual.isEmpty && _app == null && _nvs.isEmpty && _fs.isEmpty;
   int get length => _ops.length + _manual.length + (_app == null ? 0 : 1) + (stagedTable == null ? 0 : 1) + _nvs.length + _fs.length;
   int get bytesToWrite =>
@@ -612,6 +664,8 @@ class FlashPlan extends ChangeNotifier {
     _app = null;
     _appWarningText = null;
     _tableUse = TableUse.reference;
+    _tablePolicy = TablePolicy.update;
+    _tableMatch = TableMatch.exact;
     _bundleName = null;
     _bundleDescription = null;
     _nvs.clear();
@@ -707,8 +761,10 @@ class FlashPlan extends ChangeNotifier {
       for (final n in nvsPlans) SetNvsStep(partition: n.partition, set: Map.of(n.set), delete: List.of(n.delete)),
       for (final f in fsPlans) EditFsStep(f.partition, put: {for (final path in f.put.keys) path: f.bundlePath(path)}, delete: List.of(f.delete)),
     ];
-    if (_bundleName == null && _bundleDescription == null && _chip == null && ops.isEmpty) return null;
-    return FlashManifest(name: _bundleName, description: _bundleDescription, chip: _chip, ops: ops);
+    final policy = stagedTable != null && _tablePolicy != TablePolicy.update ? _tablePolicy : null;
+    final match = policy != null && _tableMatch != TableMatch.exact ? _tableMatch : null;
+    if (_bundleName == null && _bundleDescription == null && _chip == null && policy == null && ops.isEmpty) return null;
+    return FlashManifest(name: _bundleName, description: _bundleDescription, chip: _chip, tablePolicy: policy, tableMatch: match, ops: ops);
   }
 
   /// The plan as a bundle by the filename convention: the table only when
@@ -736,7 +792,11 @@ class FlashPlan extends ChangeNotifier {
   List<String> loadBundle(Uint8List zip, {required String source}) {
     final bundle = readBundle(zip, partitionTableOffset: _partitionTableOffset, primaryBootloaderOffset: _primaryBootloaderOffset);
     final notes = <String>[];
-    if (bundle.table case final t?) notes.addAll(stageTable(t, source: '$source/${bundle.tableFile}'));
+    if (bundle.table case final t?) {
+      _tablePolicy = bundle.manifest?.tablePolicy ?? TablePolicy.update;
+      _tableMatch = bundle.manifest?.tableMatch ?? TableMatch.exact;
+      notes.addAll(stageTable(t, source: '$source/${bundle.tableFile}'));
+    }
     if (bundle.bootloader case final b?) {
       if (stageBootloader((name: 'bootloader.bin', bytes: b)) case final problem?) notes.add('bootloader.bin: $problem');
     }

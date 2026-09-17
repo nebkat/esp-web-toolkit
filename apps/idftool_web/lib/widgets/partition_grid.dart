@@ -22,6 +22,7 @@ class PartitionGrid extends StatelessWidget {
     this.rowColor,
     this.rowKey,
     this.highlighted = false,
+    this.offsetText,
   });
 
   final List<PartitionDefinition> rows;
@@ -42,6 +43,9 @@ class PartitionGrid extends StatelessWidget {
 
   /// Draw a primary-coloured border (a drag is over the grid).
   final bool highlighted;
+
+  /// Replaces the offset cell, for rows whose offset isn't known.
+  final String Function(PartitionDefinition p)? offsetText;
 
   @override
   Widget build(BuildContext context) {
@@ -89,7 +93,7 @@ class PartitionGrid extends StatelessWidget {
         ])),
         DataCell(TypeChip(p.typeName, typeColor(p.type))),
         DataCell(TypeChip(p.subtypeName, subtypeColor(p))),
-        DataCell(Text(p.offset.hex)),
+        DataCell(Text(offsetText?.call(p) ?? p.offset.hex)),
         DataCell(Text('${p.size.hex} (${p.size.bytesString})')),
         DataCell(Text(p.flagNames.join(', '))),
         DataCell(contents(p)),

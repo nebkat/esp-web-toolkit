@@ -315,7 +315,16 @@ class _FlashPageState extends State<FlashPage> {
   /// exactly what is left.
   Future<void> _flash() async {
     if (plan.isEmpty || !session.connected) return;
-    final table = plan.stagedTable;
+    // Every name must exist in the table it will resolve against, before anything is written.
+    if (plan.stagedTable ?? plan.deviceTable case final resolving?) {
+      final names = {for (final op in plan.orderedOps) op.partition.name, for (final n in plan.nvsPlans) n.partition, for (final f in plan.fsPlans) f.partition};
+      final absent = [for (final name in names) if (resolving.findByName(name) == null) "'$name'"];
+      if (absent.isNotEmpty) {
+        return session.addLog('Not flashing: ${absent.join(', ')} ${absent.length == 1 ? 'is' : 'are'} not partitions on this device', error: true);
+      }
+    }
+    final table = plan.stagedTableMatches ? null : plan.stagedTable;
+    final differences = plan.tableDifferences ?? const <PartitionDifference>[];
     final bootloader = plan.bootloaderOp;
     final app = plan.app;
     final role = plan.appRole;
@@ -326,6 +335,9 @@ class _FlashPageState extends State<FlashPage> {
       if (table != null)
         '${'partition_table'.padRight(16)} ${plan.partitionTableOffset.hex.padLeft(10)}  Write ${plan.stagedTableSource}'
             '${plan.stagedTableProblem == null ? '' : '   ⚠ VERIFICATION FAILED: ${plan.stagedTableProblem}'}',
+      if (table != null)
+        for (final d in differences) '${''.padRight(16)} ${''.padLeft(10)}    ${d.name}: ${d.describe()}',
+      if (plan.stagedTableMatches) '${'partition_table'.padRight(16)} ${plan.partitionTableOffset.hex.padLeft(10)}  Already matches the device — not written',
       if (bootloader != null) _opLine(bootloader),
       if (app != null)
         '${role.fileStem.padRight(16)} ${(plan.appTarget ?? '').padLeft(10)}  Write ${app.name} (${app.bytes.length.bytesString}) to ${role.description}'
@@ -335,7 +347,7 @@ class _FlashPageState extends State<FlashPage> {
       for (final n in plan.nvsPlans) '${n.partition.padRight(16)} ${'values'.padLeft(10)}  ${n.summary}',
       for (final f in plan.fsPlans) '${f.partition.padRight(16)} ${'files'.padLeft(10)}  ${f.summary}',
     ];
-    final count = plan.length;
+    final count = plan.length - (plan.stagedTableMatches ? 1 : 0);
     final noun = 'operation${count == 1 ? '' : 's'}';
     if (!await confirm(context,
         title: 'Flash $count $noun?',
@@ -358,8 +370,10 @@ class _FlashPageState extends State<FlashPage> {
       if (table != null) {
         await device.writePartitionTable(table, force: true);
         session.addLog('partition_table: written');
-        plan.tableFlashed();
+      } else if (plan.stagedTableMatches) {
+        session.addLog('partition_table: already matches the device, not written');
       }
+      if (plan.stagedTable != null) plan.tableFlashed();
       if (bootloader != null) {
         final outcome = await device.writePartition(bootloader.partition.name, bootloader.file!.bytes, onProgress: session.reportProgress);
         session.addLog('bootloader: ${_describe(outcome)}');
@@ -415,7 +429,7 @@ class _FlashPageState extends State<FlashPage> {
     await session.readLayout();
   }
 
-  static String _opLine(PlannedOp op) => '${op.partition.name.padRight(16)} ${op.partition.offset.hex.padLeft(10)}  ${op.summary}${op.warning == null ? '' : '   ⚠ ${op.warning}'}';
+  String _opLine(PlannedOp op) => '${op.partition.name.padRight(16)} ${(plan.offsetsKnown || op.partition.isPrimaryBootloader ? op.partition.offset.hex : 'by name').padLeft(10)}  ${op.summary}${op.warning == null ? '' : '   ⚠ ${op.warning}'}';
 
   static String _describe(WriteOutcome o) => o.skipped
       ? 'already in flash, nothing written'
@@ -498,7 +512,7 @@ class _FlashPageState extends State<FlashPage> {
           onRemove: plan.unstage,
           onRemoveApp: plan.unstageApp,
           onRemoveManual: plan.unstageManual,
-          onDiscardTable: () => plan.setTableUse(TableUse.reference)),
+          onDiscardTable: () => _log(plan.setTableUse(TableUse.reference), error: true)),
     ]);
   }
 
@@ -527,6 +541,7 @@ class _FlashPageState extends State<FlashPage> {
     required String? warning,
     required VoidCallback onRemove,
     required List<Widget> actions,
+    Widget? plannedCell,
     Color? color,
     ColorScheme? scheme,
   }) {
@@ -540,7 +555,7 @@ class _FlashPageState extends State<FlashPage> {
         const SizedBox(width: 24),
         Expanded(child: description),
         const SizedBox(width: 16),
-        _plannedCell(key, planned, warning, onRemove: onRemove),
+        if (_hoverRow != key && plannedCell != null) plannedCell else _plannedCell(key, planned, warning, onRemove: onRemove),
         const SizedBox(width: 16),
         ...actions,
       ]),
@@ -551,9 +566,10 @@ class _FlashPageState extends State<FlashPage> {
     final table = plan.table;
     final flash = plan.tableUse == TableUse.flash;
     final sourceLabel = switch (plan.tableSource) {
-      TableSource.device => "Device's table (${plan.deviceTable?.length ?? 0} partitions)",
+      TableSource.device => "the device's table (${plan.deviceTable?.length ?? 0} partitions)",
       TableSource.file => '${plan.fileTableSource} (${plan.fileTable!.length} partitions)',
     };
+    final fromFile = plan.tableSource == TableSource.file;
     final problem = plan.tableSource == TableSource.file ? plan.fileTableProblem : null;
     return _box(scheme, title: 'Partition table', children: [
       _row(
@@ -582,7 +598,7 @@ class _FlashPageState extends State<FlashPage> {
             selected: {plan.tableUse},
             showSelectedIcon: false,
             style: const ButtonStyle(visualDensity: VisualDensity.compact),
-            onSelectionChanged: table == null ? null : (s) => plan.setTableUse(s.single),
+            onSelectionChanged: table == null ? null : (s) => _log(plan.setTableUse(s.single), error: true),
           ),
           IconButton(tooltip: 'What Reference and Flash mean', icon: const Icon(Icons.help_outline, size: 18), onPressed: _explainTableUse),
         ]),
@@ -594,25 +610,118 @@ class _FlashPageState extends State<FlashPage> {
                     : 'No device yet: partitions are named by their file, or by hand, and line up when one connects',
                 style: TextStyle(color: scheme.outline)),
           if (problem != null) TextSpan(text: 'VERIFICATION FAILED: $problem', style: TextStyle(color: scheme.error)),
-          if (plan.tableSource == TableSource.file && plan.deviceTable != null && plan.fileTable != plan.deviceTable)
-            TextSpan(text: 'Differs from the device: rows below marked new, moved or resized are not where the device thinks they are', style: TextStyle(color: scheme.outline)),
+          if (plan.tableSource == TableSource.file && problem == null) _comparison(scheme, flash: flash),
         ])),
-        planned: table == null ? null : (flash ? 'Write ${plan.tableSource == TableSource.file ? plan.fileTableSource : "the device's table"}' : 'Reference only'),
+        planned: flash && table != null ? 'Write $sourceLabel' : null,
         warning: flash ? problem : null,
-        onRemove: () => plan.setTableUse(TableUse.reference),
+        onRemove: () => _log(plan.setTableUse(TableUse.reference), error: true),
+        plannedCell: table == null
+            ? null
+            : flash
+                ? InputChip(
+                    avatar: Icon(problem != null ? Icons.warning_amber : Icons.upload_file, size: 18, color: problem != null ? scheme.error : null),
+                    label: Text('${plan.stagedTableMatches ? 'Include' : 'Write'} $sourceLabel'),
+                    tooltip: problem ?? (plan.stagedTableMatches ? 'Matches the device, so it is not written to it' : null),
+                    onDeleted: () => _log(plan.setTableUse(TableUse.reference), error: true),
+                    deleteButtonTooltipMessage: "Don't write it: use it for reference only",
+                  )
+                : _referenceCell(scheme, sourceLabel, onClose: fromFile ? () => _log(plan.closeTableFile(), error: true) : null),
         actions: [
-          if (table != null)
-            InputChip(
-              avatar: const Icon(Icons.table_chart_outlined, size: 18),
-              label: Text(sourceLabel),
-              tooltip: plan.tableSource == TableSource.file ? "Close the file and go back to the device's table" : 'The table read from the device',
-              onDeleted: plan.tableSource == TableSource.file ? () => _log(plan.closeTableFile(), error: true) : null,
-              deleteButtonTooltipMessage: 'Close file',
-            ),
           TextButton.icon(onPressed: () => _pick(_tableKey, extensions: ['csv', 'bin']), icon: const Icon(Icons.folder_open, size: 18), label: const Text('Open…')),
         ],
       ),
+      if (flash && table != null)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+          child: Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+            Text("If a device's table differs:", style: TextStyle(color: scheme.outline)),
+            SegmentedButton<TablePolicy>(
+              segments: const [
+                ButtonSegment(value: TablePolicy.update, label: Text('Update it'), tooltip: 'Write this table first, without asking'),
+                ButtonSegment(value: TablePolicy.ask, label: Text('Ask'), tooltip: 'Show the differences and let the person flashing decide'),
+                ButtonSegment(value: TablePolicy.require, label: Text('Never write it'), tooltip: 'Only flash devices whose table is compatible'),
+              ],
+              selected: {plan.tablePolicy},
+              showSelectedIcon: false,
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+              onSelectionChanged: (s) => plan.setTablePolicy(s.single),
+            ),
+            const SizedBox(width: 12),
+            Text('Firmware needs:', style: TextStyle(color: scheme.outline)),
+            SegmentedButton<TableMatch>(
+              segments: const [
+                ButtonSegment(value: TableMatch.exact, label: Text('This exact layout'), tooltip: 'Any difference means the table has to be written'),
+                ButtonSegment(
+                    value: TableMatch.used,
+                    label: Text('Only the partitions it uses'),
+                    tooltip: "A device whose other partitions differ can keep its own layout, as long as every partition this bundle writes, erases or edits is the same"),
+              ],
+              selected: {plan.tableMatch},
+              showSelectedIcon: false,
+              style: const ButtonStyle(visualDensity: VisualDensity.compact),
+              onSelectionChanged: plan.tablePolicy == TablePolicy.update ? null : (s) => plan.setTableMatch(s.single),
+            ),
+          ]),
+        ),
     ]);
+  }
+
+  /// Reference mode's cell: one control in two parts, "Reference" (what it
+  /// means) and the table itself (closable when it is a file).
+  Widget _referenceCell(ColorScheme scheme, String label, {VoidCallback? onClose}) {
+    final text = Theme.of(context).textTheme.labelLarge;
+    const radius = Radius.circular(8);
+    return Container(
+      height: 32,
+      decoration: BoxDecoration(border: Border.all(color: scheme.outlineVariant), borderRadius: const BorderRadius.all(radius)),
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        InkWell(
+          onTap: _explainTableUse,
+          borderRadius: const BorderRadius.horizontal(left: radius),
+          child: Tooltip(
+            message: 'What Reference and Flash mean',
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              child: Row(children: [
+                Icon(Icons.visibility_outlined, size: 18, color: scheme.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Text('Reference', style: text),
+              ]),
+            ),
+          ),
+        ),
+        VerticalDivider(width: 1, color: scheme.outlineVariant),
+        Padding(
+          padding: EdgeInsets.only(left: 10, right: onClose == null ? 10 : 0),
+          child: Text(label[0].toUpperCase() + label.substring(1), style: text),
+        ),
+        if (onClose != null)
+          IconButton(
+            tooltip: "Close the file and go back to the device's table",
+            icon: const Icon(Icons.close, size: 16),
+            visualDensity: VisualDensity.compact,
+            onPressed: onClose,
+          ),
+      ]),
+    );
+  }
+
+  /// How a file's table compares with the device's, in the table box.
+  TextSpan _comparison(ColorScheme scheme, {required bool flash}) {
+    final differences = plan.tableDifferences;
+    if (differences == null) {
+      return TextSpan(
+          text: flash ? 'Compared with the device when one connects' : 'No device table yet: offsets are unknown until one connects, since writes land by name',
+          style: TextStyle(color: scheme.outline));
+    }
+    if (differences.isEmpty) return TextSpan(text: 'Matches the device', style: TextStyle(color: scheme.outline));
+    final n = differences.length;
+    return TextSpan(
+      text: flash
+          ? 'Differs from the device in $n partition${n == 1 ? '' : 's'}: rows below say how'
+          : 'Differs from the device in $n partition${n == 1 ? '' : 's'}: writes land by the device\'s layout, shown below',
+      style: TextStyle(color: scheme.error),
+    );
   }
 
   /// What Reference and Flash mean for the table.
@@ -626,10 +735,16 @@ class _FlashPageState extends State<FlashPage> {
               "The partition table is what gives partitions their names, so the plan always works against one: the device's own, "
               'or one opened from a file.\n\n'
               'Reference only uses it to name the partitions and nothing more. Nothing is written to the table sector, '
-              'and a bundle saved from this plan carries no table, so it will flash onto any device whose table already has these names.\n\n'
-              'Flash writes the table first, before anything else, and includes it in a saved bundle, so the bundle carries the layout '
-              "its files were named against and can be applied to a device with a different table. Writing the device's own table back "
-              'to it changes nothing on that device. Only the map is replaced: existing partition data is not moved, resized or erased.',
+              "and a bundle saved from this plan carries no table, so it will flash onto any device whose table already has these names — "
+              "wherever that device's table puts them. A name the device doesn't have stops the flash before anything is written.\n\n"
+              'Flash includes the table, so the bundle carries the layout its files were named against. Before anything is written it is '
+              "compared with the device's: if they match, nothing happens to the table. If they differ, the choices below decide. "
+              'Update it writes the table first. Ask shows the person flashing what differs and lets them decide. '
+              'Never write it flashes only a device that is already compatible.\n\n'
+              'What compatible means is up to the firmware. "This exact layout" means any difference counts. '
+              '"Only the partitions it uses" means a device may keep its own layout as long as every partition the bundle writes, '
+              'erases or edits is identical there; the person flashing can then choose to keep it, and Never write it flashes such a device as it is.\n\n'
+              'Only the map is replaced: existing partition data is not moved, resized or erased.',
             ),
           ),
           actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
@@ -712,7 +827,8 @@ class _FlashPageState extends State<FlashPage> {
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       PartitionGrid(
         rows: plan.partitionRows,
-        table: table,
+        table: plan.namesOnly ? PartitionTable(plan.partitionRows) : table,
+        offsetText: plan.offsetsKnown ? null : (_) => 'by name',
         activeSlot: plan.tableSource == TableSource.device ? plan.otadata?.slot : null,
         highlighted: _dragging,
         rowKey: (p) => _rowKeys.putIfAbsent(p.name, GlobalKey.new),
@@ -789,17 +905,22 @@ class _FlashPageState extends State<FlashPage> {
   /// What the device holds at this row, or, on a file's table, how the row
   /// differs from the device.
   Widget _contents(PartitionDefinition p, ColorScheme scheme) {
-    final device = plan.deviceTable;
-    if (plan.tableSource == TableSource.file && device != null) {
-      final was = device.findByName(p.name);
-      final note = was == null
-          ? 'new'
-          : was.offset != p.offset
-              ? 'moved from ${was.offset.hex}'
-              : was.size != p.size
-                  ? 'resized from ${was.size.bytesString}'
-                  : null;
-      if (note != null) return Text(note, style: TextStyle(color: scheme.error, fontStyle: FontStyle.italic));
+    final difference = plan.tableDifferences?.where((d) => d.name == p.name).firstOrNull;
+    if (difference != null) {
+      final (file, device) = (difference.expected, difference.actual);
+      // Names only: the row shows the device's geometry, so say what the file had.
+      final note = !plan.namesOnly
+          ? difference.describe()
+          : device == null
+              ? 'not on the device'
+              : file == null
+                  ? 'not in the file'
+                  : 'file: ${[
+                      if (file.offset != device.offset) 'at ${file.offset.hex}',
+                      if (file.size != device.size) file.size.bytesString,
+                      if (file.type != device.type || file.subtype != device.subtype) '${file.typeName}/${file.subtypeName}',
+                    ].join(', ')}';
+      return Text(note, style: TextStyle(color: scheme.error, fontStyle: FontStyle.italic));
     }
     return Text(appContents(plan.deviceApps, p));
   }
@@ -843,30 +964,19 @@ class _FlashPageState extends State<FlashPage> {
     final scheme = Theme.of(context).colorScheme;
     if (_hoverRow == name) return Text('Drop to write', style: TextStyle(color: scheme.primary, fontStyle: FontStyle.italic));
     if (planned == null) return _dragging ? const SizedBox.shrink() : Text('—', style: TextStyle(color: scheme.outlineVariant));
-    final passive = planned == 'Reference only';
-    if (passive) {
-      return ActionChip(
-        avatar: const Icon(Icons.visibility_outlined, size: 18),
-        label: Text(planned),
-        tooltip: 'What Reference and Flash mean',
-        onPressed: _explainTableUse,
-      );
-    }
     return InputChip(
       avatar: Icon(
         warning != null
             ? Icons.warning_amber
-            : passive
-                ? Icons.visibility_outlined
-                : planned.startsWith('Erase')
-                    ? Icons.delete_outline
-                    : Icons.upload_file,
+            : planned.startsWith('Erase')
+                ? Icons.delete_outline
+                : Icons.upload_file,
         size: 18,
         color: warning != null ? scheme.error : null,
       ),
       label: Text(planned),
       tooltip: warning ?? planned,
-      onDeleted: passive ? null : onRemove,
+      onDeleted: onRemove,
       deleteButtonTooltipMessage: 'Remove from plan',
     );
   }
@@ -925,7 +1035,17 @@ class _PlanPanel extends StatelessWidget {
                 icon: plan.stagedTableProblem == null ? Icons.table_chart : Icons.error_outline,
                 name: 'partition_table',
                 detail: plan.partitionTableOffset.hex,
-                summary: 'Write ${plan.stagedTableSource} (first)',
+                summary: plan.stagedTableMatches
+                    ? 'Include ${plan.stagedTableSource}; matches the device, so not written'
+                    : switch (plan.tablePolicy) {
+                        TablePolicy.update => 'Write ${plan.stagedTableSource} (first) if it differs',
+                        TablePolicy.ask => plan.tableMatch == TableMatch.used
+                            ? "Write ${plan.stagedTableSource} (first) if it differs and the user agrees, or keep the device's where the partitions used match"
+                            : 'Write ${plan.stagedTableSource} (first) if it differs and the user agrees',
+                        TablePolicy.require => plan.tableMatch == TableMatch.used
+                            ? "Never write ${plan.stagedTableSource}: a device whose partitions used differ is refused"
+                            : 'Never write ${plan.stagedTableSource}: a device laid out differently is refused',
+                      },
                 warning: plan.stagedTableProblem == null ? null : 'Verification failed: ${plan.stagedTableProblem}',
                 onRemove: onDiscardTable,
               ),
@@ -949,7 +1069,7 @@ class _PlanPanel extends StatelessWidget {
               OpTile(
                   icon: Icons.delete_outline,
                   name: op.partition.name,
-                  detail: op.partition.offset.hex,
+                  detail: plan.offsetsKnown ? op.partition.offset.hex : 'by name',
                   summary: op.summary,
                   warning: op.warning,
                   onRemove: () => onRemove(op.partition.name)),
@@ -957,7 +1077,7 @@ class _PlanPanel extends StatelessWidget {
               OpTile(
                   icon: Icons.upload_file,
                   name: op.partition.name,
-                  detail: op.partition.offset.hex,
+                  detail: plan.offsetsKnown ? op.partition.offset.hex : 'by name',
                   summary: op.summary,
                   warning: op.warning,
                   onRemove: () => onRemove(op.partition.name)),

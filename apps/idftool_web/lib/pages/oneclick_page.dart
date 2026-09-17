@@ -50,6 +50,13 @@ class _OneClickPageState extends State<OneClickPage> {
   /// The log appears once a device has been connected and stays for good.
   bool _logShown = false;
 
+  /// The bundle checked against the connected device's table, once read.
+  BundleCheck? _check;
+  bool _checkStarted = false;
+
+  /// What the person flashing chose for a differing table ([TablePolicy.ask]).
+  TableChoice? _tableChoice;
+
   DeviceSession get session => widget.session;
 
   @override
@@ -117,6 +124,7 @@ class _OneClickPageState extends State<OneClickPage> {
         _fileProblem = null;
         _completed.clear();
         _currentStep = -1;
+        _forgetCheck();
       });
     } catch (e) {
       final problem = '$name is not a usable bundle: ${e is IdfToolException ? e.message : e}';
@@ -131,7 +139,26 @@ class _OneClickPageState extends State<OneClickPage> {
         _problem = null;
         _completed.clear();
         _currentStep = -1;
+        _forgetCheck();
       });
+
+  void _forgetCheck() {
+    _check = null;
+    _checkStarted = false;
+    _tableChoice = null;
+  }
+
+  /// Read the device's table and check the bundle against it: nothing is
+  /// written, and the outline then says what the flash will really do.
+  Future<void> _checkDevice() async {
+    final bundle = _bundle;
+    if (bundle == null) return;
+    _checkStarted = true;
+    final check = await session.runDevice(
+        'Check the device',
+        (device) async => checkBundle(bundle, await readDeviceTable(device)));
+    if (mounted && identical(bundle, _bundle)) setState(() => _check = check);
+  }
 
   Future<void> _flash() async {
     final bundle = _bundle!;
@@ -154,6 +181,7 @@ class _OneClickPageState extends State<OneClickPage> {
           onProgress: session.reportProgress,
           nvsKeys: session.nvsKeys,
           log: session.addLog,
+          chooseTable: (_) async => _tableChoice,
         );
         _completed.add(_currentStep);
       } catch (e) {
@@ -178,6 +206,11 @@ class _OneClickPageState extends State<OneClickPage> {
     final theme = Theme.of(context);
     final bundle = _bundle;
     if (session.connected) _logShown = true;
+    if (!session.connected && _checkStarted) _forgetCheck();
+    if (session.connected && !session.busy && !_checkStarted && bundle != null && _phase == _Phase.ready) {
+      _checkStarted = true;
+      Future<void>.microtask(_checkDevice);
+    }
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -282,12 +315,13 @@ class _OneClickPageState extends State<OneClickPage> {
           const SizedBox(height: 16),
           Text('This update will:', style: theme.textTheme.labelLarge),
           for (var i = 0; i < bundle.steps.length; i++)
-            if (_row(bundle, bundle.steps[i]) case final row)
+            if (_row(bundle, bundle.steps[i]) case final row) ...[
               OpTile(
                 icon: row.icon,
                 name: row.name,
                 detail: row.detail,
                 summary: row.summary,
+                warning: _check?.missing[i] ?? (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false) ? _check!.blocker : null),
                 leading: SizedBox(
                   width: 24,
                   child: Center(
@@ -301,20 +335,32 @@ class _OneClickPageState extends State<OneClickPage> {
                   ),
                 ),
               ),
+              if (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false)) _tableChanges(_check!, theme, enabled: _phase == _Phase.ready),
+            ],
           const SizedBox(height: 20),
           switch (_phase) {
             _Phase.done => Row(children: [
                 const Icon(Icons.check_circle, color: Colors.green),
                 const SizedBox(width: 8),
                 const Expanded(child: Text('Done. The device has been reset and is running the update.')),
-                TextButton(onPressed: () => setState(() => _phase = _Phase.ready), child: const Text('Flash another')),
+                TextButton(
+                    onPressed: () => setState(() {
+                          _phase = _Phase.ready;
+                          _forgetCheck();
+                        }),
+                    child: const Text('Flash another')),
               ]),
             _Phase.failed => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                 Text('Flashing failed: $_problem', style: TextStyle(color: theme.colorScheme.error)),
                 const SizedBox(height: 8),
                 Text('Reconnect the device and try again. If it keeps failing, send the log below to support.', style: theme.textTheme.bodySmall),
                 const SizedBox(height: 8),
-                FilledButton.tonal(onPressed: () => setState(() => _phase = _Phase.ready), child: const Text('Try again')),
+                FilledButton.tonal(
+                    onPressed: () => setState(() {
+                          _phase = _Phase.ready;
+                          _forgetCheck();
+                        }),
+                    child: const Text('Try again')),
               ]),
             _ => _connectAndFlash(theme),
           },
@@ -327,12 +373,30 @@ class _OneClickPageState extends State<OneClickPage> {
   /// (named against the bundle's own table when it carries one) and what
   /// is written there.
   ({IconData icon, String name, String detail, String summary}) _row(FlashBundle bundle, FlashStep step) {
-    final table = bundle.contents.table;
+    // Offsets come from the bundle's own table, or else from the connected
+    // device's, which is where names will land; with neither, only names.
+    final table = bundle.contents.table ?? _check?.deviceTable;
     String size(String file) => bundle.files[file]?.length.bytesString ?? '?';
     PartitionDefinition? find(String name) => table?.findByName(name);
     String offset(String name) => find(name)?.offset.hex ?? 'by name';
     return switch (step) {
-      WriteTableStep(:final file) => (icon: Icons.table_chart, name: 'partition_table', detail: PartitionTable.defaultOffset.hex, summary: 'Write $file (first)'),
+      WriteTableStep(:final file, :final policy) => (
+          icon: _check?.tableMatches ?? false ? Icons.check : Icons.table_chart,
+          name: 'partition_table',
+          detail: PartitionTable.defaultOffset.hex,
+          summary: switch ((_check, policy)) {
+            (null, TablePolicy.update) => "Update the partition layout from $file, if the device's differs",
+            (null, TablePolicy.ask) => 'Check the partition layout against $file; ask before updating it',
+            (null, TablePolicy.require) => 'Check the device is laid out as in $file',
+            (final c?, _) when c.tableMatches => 'The partition layout already matches: left as it is',
+            (final c?, TablePolicy.update) => "Update the partition layout: this device's differs in ${c.differences.length} partition${c.differences.length == 1 ? '' : 's'}",
+            (final c?, TablePolicy.ask) when c.canKeepLayout =>
+              "This device's partition layout differs in ${c.differences.length} partition${c.differences.length == 1 ? '' : 's'}, none of them used by this update",
+            (final c?, TablePolicy.ask) => "This device's partition layout differs in ${c.differences.length} partition${c.differences.length == 1 ? '' : 's'}",
+            (final c?, TablePolicy.require) when c.canKeepLayout => "This device's partition layout differs, but not where this update writes: left as it is",
+            (_, TablePolicy.require) => "This device's partition layout is different",
+          },
+        ),
       WriteBootloaderStep(:final file) => (
           icon: Icons.upload_file,
           name: 'bootloader',
@@ -376,6 +440,70 @@ class _OneClickPageState extends State<OneClickPage> {
     };
   }
 
+  /// Under the table step when the device's table differs: what differs,
+  /// and for [TablePolicy.ask] the choice — update it, or keep the device's
+  /// when nothing this update uses differs.
+  Widget _tableChanges(BundleCheck check, ThemeData theme, {required bool enabled}) {
+    final scheme = theme.colorScheme;
+    final mono = TextStyle(fontFamily: 'RobotoMono', fontSize: 12, color: scheme.onSurfaceVariant);
+    return Container(
+      margin: const EdgeInsets.only(left: 64, bottom: 8),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: check.needsApproval ? scheme.tertiaryContainer.withValues(alpha: 0.4) : scheme.surfaceContainerHighest.withValues(alpha: 0.5),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        if (check.deviceTable == null)
+          Text('The device has no partition table yet.', style: mono)
+        else
+          for (final d in check.differences)
+            Text('${d.name.padRight(12)} ${d.describe()}${check.match == TableMatch.used && check.used.contains(d.name) ? '   (used by this update)' : ''}',
+                style: mono),
+        if (check.needsApproval && check.canKeepLayout) ...[
+          const SizedBox(height: 8),
+          RadioGroup<TableChoice>(
+            groupValue: _tableChoice,
+            onChanged: (v) => enabled ? setState(() => _tableChoice = v) : null,
+            child: Column(children: [
+              RadioListTile<TableChoice>(
+                value: TableChoice.update,
+                enabled: enabled,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text('Update the partition layout'),
+                subtitle: const Text('Only the layout is replaced; nothing stored on the device is moved or erased.'),
+              ),
+              RadioListTile<TableChoice>(
+                value: TableChoice.keep,
+                enabled: enabled,
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                title: const Text("Keep this device's layout"),
+                subtitle: const Text('None of the partitions above are used by this update, so it can be flashed as the device is.'),
+              ),
+            ]),
+          ),
+        ] else if (check.needsApproval) ...[
+          const SizedBox(height: 8),
+          CheckboxListTile(
+            value: _tableChoice == TableChoice.update,
+            onChanged: enabled ? (v) => setState(() => _tableChoice = v ?? false ? TableChoice.update : null) : null,
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            controlAffinity: ListTileControlAffinity.leading,
+            title: const Text('Update the partition layout on this device'),
+            subtitle: const Text('Only the layout is replaced; nothing stored on the device is moved or erased. '
+                "If you weren't told to expect this, stop and ask whoever sent you this update."),
+          ),
+        ] else if (check.automaticChoice == TableChoice.keep) ...[
+          const SizedBox(height: 8),
+          Text("None of these partitions are used by this update, so the device's layout is kept.", style: TextStyle(color: scheme.onSurfaceVariant)),
+        ],
+      ]),
+    );
+  }
+
   Widget _connectAndFlash(ThemeData theme) {
     final flashing = _phase == _Phase.flashing;
     if (!session.connected) {
@@ -402,6 +530,10 @@ class _OneClickPageState extends State<OneClickPage> {
       ]);
     }
     final chipMismatch = _bundle!.chip != null && session.chip != _bundle!.chip;
+    final check = _check;
+    final checking = _checkStarted && check == null && session.busy && !flashing;
+    final blocker = check?.blocker;
+    final awaitingApproval = (check?.needsApproval ?? false) && _tableChoice == null;
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Row(children: [
         const Icon(Icons.check_circle, size: 18, color: Colors.green),
@@ -414,12 +546,27 @@ class _OneClickPageState extends State<OneClickPage> {
           child: Text('This update is for ${_bundle!.chip!.name}, but the connected device is a ${session.chip?.name}.',
               style: TextStyle(color: theme.colorScheme.error)),
         ),
+      if (!chipMismatch && !flashing && blocker != null)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text('This update cannot be flashed onto this device: $blocker.', style: TextStyle(color: theme.colorScheme.error)),
+        ),
+      if (!chipMismatch && !flashing && blocker == null && awaitingApproval)
+        Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: Text(check!.canKeepLayout ? 'Choose what to do with the partition layout above to continue.' : 'Agree to the partition layout update above to continue.',
+              style: TextStyle(color: theme.colorScheme.outline)),
+        ),
       const SizedBox(height: 12),
       Row(children: [
         FilledButton.icon(
-          onPressed: flashing || chipMismatch ? null : _flash,
-          icon: const Icon(Icons.flash_on),
-          label: Text(flashing ? 'Flashing…' : 'Flash'),
+          onPressed: flashing || chipMismatch || checking || blocker != null || awaitingApproval ? null : _flash,
+          icon: checking ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.flash_on),
+          label: Text(flashing
+              ? 'Flashing…'
+              : checking
+                  ? 'Checking the device…'
+                  : 'Flash'),
         ),
         const SizedBox(width: 12),
         if (!flashing) TextButton(onPressed: () => session.disconnect(hardReset: false), child: const Text('Disconnect')),

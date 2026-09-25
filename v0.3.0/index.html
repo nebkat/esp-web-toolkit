@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <!--
+    If you are serving your web app in a path other than the root, change the
+    href value below to reflect the base path you are serving from.
+
+    The path provided below has to start and end with a slash "/" in order for
+    it to work correctly.
+
+    For more details:
+    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
+
+    This is a placeholder for base href that will be replaced by the value of
+    the `--base-href` argument provided to `flutter build`.
+  -->
+  <base href="/esp-web-toolkit/v0.3.0/">
+
+  <meta charset="UTF-8">
+  <meta content="IE=Edge" http-equiv="X-UA-Compatible">
+  <meta name="description" content="ESP Web Toolkit — partition tables, flashing, NVS, filesystems and one-click firmware bundles for Espressif devices over Web Serial.">
+
+  <!-- iOS meta tags & icons -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="ESP Web Toolkit">
+  <link rel="apple-touch-icon" href="icons/Icon-192.png">
+
+  <!-- Favicon -->
+  <link rel="icon" type="image/png" href="favicon.png"/>
+
+  <title>ESP Web Toolkit</title>
+  <link rel="manifest" href="manifest.json">
+
+  <!--
+    The app's routes live in the fragment (#/oneclick?bundle=…). Links from
+    before that put the route in the path, /v1.2.3/oneclick?bundle=…: GitHub
+    Pages serves those the site's 404.html, which sends them here as
+    ?p=/oneclick?bundle=…. A query with no route (?remote=…) belonged to the
+    first page. Move either into the fragment before the app reads the URL.
+  -->
+  <script>
+    (function () {
+      if (location.hash.indexOf('#/') === 0) return;
+      var p = new URLSearchParams(location.search).get('p');
+      var route = p !== null ? p : location.search ? '/' + location.search : null;
+      if (route !== null) history.replaceState(null, '', document.baseURI + '#' + route);
+    })();
+  </script>
+</head>
+<body>
+  <!--
+    You can customize the "flutter_bootstrap.js" script.
+    This is useful to provide a custom configuration to the Flutter loader
+    or to give the user feedback during the initialization process.
+
+    For more details:
+    * https://docs.flutter.dev/platform-integration/web/initialization
+  -->
+  <script src="flutter_bootstrap.js" async></script>
+</body>
+</html>

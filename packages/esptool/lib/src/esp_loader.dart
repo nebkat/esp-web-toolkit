@@ -97,13 +97,16 @@ class EspLoader {
   /// peripheral (the host sees Espressif VID `0x303A` with the chip's
   /// [EspChip.imageChipId] as PID) — the stub must then use smaller blocks.
   /// [baudRate] is the transport's current rate, needed by [changeBaudRate].
-  EspLoader(this.transport, {this.usbOtg = false, int baudRate = 115200})
+  /// [latency] is the round trip the transport adds on top of the serial line
+  /// (a network relay, say); it is added to the loader's short timeouts.
+  EspLoader(this.transport, {this.usbOtg = false, int baudRate = 115200, this.latency = Duration.zero})
       : _reader = SlipReader(transport.input),
         _baudRate = baudRate;
 
   final EspTransport transport;
   final SlipReader _reader;
   final bool usbOtg;
+  final Duration latency;
   int _baudRate;
   bool _isStub = false;
   bool _syncStubDetected = false;
@@ -214,7 +217,7 @@ class EspLoader {
     final syncPayload = Uint8List.fromList(
       [0x07, 0x07, 0x12, 0x20, ...List<int>.filled(32, 0x55)],
     );
-    final (value, _) = await command(op: EspCommand.sync, data: syncPayload, timeout: syncTimeout);
+    final (value, _) = await command(op: EspCommand.sync, data: syncPayload, timeout: syncTimeout + latency);
     // ROMs reply with some non-zero value; the stub replies 0. All-zero
     // replies mean the reset didn't take and we're still talking to a stub.
     _syncStubDetected = value == 0;
@@ -222,7 +225,7 @@ class EspLoader {
     // don't get mistaken for the next command's response.
     for (var i = 0; i < 7; i++) {
       try {
-        final (value, _) = await command(timeout: syncTimeout);
+        final (value, _) = await command(timeout: syncTimeout + latency);
         _syncStubDetected &= value == 0;
       } catch (_) {
         break;
@@ -287,7 +290,7 @@ class EspLoader {
     final data = _bytes([_u32(entrypoint == 0 ? 1 : 0), _u32(entrypoint)]);
     try {
       await checkCommand('leave RAM download mode',
-          op: EspCommand.memEnd, data: data, timeout: _isStub ? defaultTimeout : memEndRomTimeout);
+          op: EspCommand.memEnd, data: data, timeout: _isStub ? defaultTimeout : memEndRomTimeout + latency);
     } on EspException {
       if (_isStub) rethrow;
     } on TimeoutException {

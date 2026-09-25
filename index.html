@@ -4,18 +4,19 @@
   <meta charset="UTF-8">
   <title>ESP Web Toolkit</title>
   <!--
-    The site root (see 404.html): links from before versions open in LEGACY.
-    The oldest one-click links put the route in the fragment
-    (#/oneclick?bundle=…); they become the path form.
+    The site root (see 404.html): opens the latest version, keeping the
+    query and fragment. The oldest one-click links put the route in the
+    fragment (#/oneclick?bundle=…); they become the path form. The Pages
+    workflow fills in LATEST when it publishes.
   -->
   <script>
-    var LEGACY = 'v0.1.0';
+    var LATEST = 'v0.2.0';
     location.replace(location.hash.indexOf('#/') === 0
-      ? LEGACY + '/?p=' + encodeURIComponent(location.hash.slice(1))
-      : LEGACY + '/' + location.search + location.hash);
+      ? LATEST + '/?p=' + encodeURIComponent(location.hash.slice(1))
+      : LATEST + '/' + location.search + location.hash);
   </script>
 </head>
 <body>
-  <p><a href="v0.1.0/">ESP Web Toolkit</a></p>
+  <p><a href="v0.2.0/">ESP Web Toolkit</a></p>
 </body>
 </html>

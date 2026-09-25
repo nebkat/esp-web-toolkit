@@ -9,10 +9,11 @@ import '../widgets/dropdown.dart';
 import '../widgets/log_panel.dart';
 import '../widgets/port_picker.dart';
 
-/// Owns the session and relay host for `/relay`. `?relay=<ws url>` presets
-/// the relay server.
+/// Owns the session and relay host for `#/relay`; `?relay=<ws url>` there
+/// presets the relay server ([relayUrl]).
 class RelayShell extends StatefulWidget {
-  const RelayShell({super.key});
+  const RelayShell({super.key, this.relayUrl});
+  final Uri? relayUrl;
 
   @override
   State<RelayShell> createState() => _RelayShellState();
@@ -20,10 +21,7 @@ class RelayShell extends StatefulWidget {
 
 class _RelayShellState extends State<RelayShell> {
   final _session = DeviceSession();
-  late final _host = RelayHost(_session, relayUrl: switch (Uri.base.queryParameters['relay']) {
-    final relay? => parseRelayUrl(relay),
-    null => null,
-  });
+  late final _host = RelayHost(_session, relayUrl: widget.relayUrl);
 
   @override
   void dispose() {
@@ -39,7 +37,7 @@ class _RelayShellState extends State<RelayShell> {
       );
 }
 
-/// `/relay`: share a device on this computer with someone else's browser.
+/// `#/relay`: share a device on this computer with someone else's browser.
 /// Pick the port and the relay, Share, and hand out the link; the other end
 /// opens the full tool with this device as its port.
 class RelayPage extends StatefulWidget {

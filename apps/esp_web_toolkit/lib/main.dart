@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_web_plugins/url_strategy.dart';
 import 'package:idftool/idftool.dart' show PartitionTable;
 
 import 'pages/data_page.dart';
@@ -18,15 +17,17 @@ import 'widgets/connection_bar.dart';
 import 'widgets/empty_state.dart';
 import 'widgets/log_panel.dart';
 
-void main() {
-  usePathUrlStrategy();
-  runApp(const IdfToolApp());
-}
+/// Routes live in the fragment (`#/flash?remote=…`, the default URL
+/// strategy): every link is then served by a version's index.html as is,
+/// and what follows the `#` — a relay session id, a bundle's address —
+/// never reaches the server. Links from before, with the route in the path,
+/// are moved into the fragment by web/index.html.
+void main() => runApp(const IdfToolApp());
 
 class IdfToolApp extends StatelessWidget {
   const IdfToolApp({super.key});
 
-  /// The one-click flasher's path. `/oneclick?bundle=<url>` is the link to
+  /// The one-click flasher's route. `#/oneclick?bundle=<url>` is the link to
   /// hand out, with the bundle's absolute URL.
   static const oneClickPath = '/oneclick';
 
@@ -34,29 +35,26 @@ class IdfToolApp extends StatelessWidget {
   /// the full tool with `?remote=<relay>/c/<id>`.
   static const relayPath = '/relay';
 
-  /// Which page a route name (the URL, relative to the base href) opens:
-  /// [oneClickPath] is the one-click flasher, `/<tool>` (`/flash`, say) the
-  /// full tool on that page, anything else the full tool on its first page.
-  /// [relayPath] shares a device; `?remote=<ws url>` on the full tool uses
-  /// one shared that way. The older `#/oneclick?bundle=<url>` fragment form still works.
+  /// Which page a route (the URL's fragment) opens: [oneClickPath] is the
+  /// one-click flasher, `/<tool>` (`/flash`, say) the full tool on that
+  /// page, anything else the full tool on its first page. [relayPath] shares
+  /// a device; `?remote=<ws url>` on the full tool uses one shared that way.
   static Widget _entry(String name) {
-    var route = Uri.tryParse(name);
-    final path = route?.path.replaceAll(RegExp(r'/+$'), '');
-    final remoteParam = Uri.base.queryParameters['remote'];
-    final remote = remoteParam == null ? null : parseRemoteAddress(remoteParam);
+    final route = Uri.tryParse(name) ?? Uri(path: '/');
+    final path = route.path.replaceAll(RegExp(r'/+$'), '');
+    final params = route.queryParameters;
+    final remote = switch (params['remote']) {
+      final r? => parseRemoteAddress(r),
+      null => null,
+    };
     // A remote device needs no Web Serial on this end.
     if (!DeviceSession.supported && (remote == null || path == oneClickPath || path == relayPath)) return const UnsupportedBrowserPage();
-    if (path == relayPath) return const RelayShell();
-    if (route == null || path != oneClickPath) {
-      final fragment = Uri.base.fragment;
-      final legacy = fragment.isEmpty ? null : Uri.tryParse(fragment.startsWith('/') ? fragment : '/$fragment');
-      if (legacy == null || legacy.path != oneClickPath) {
-        return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions, remoteUrl: remote);
-      }
-      route = legacy;
+    if (path == relayPath) return RelayShell(relayUrl: switch (params['relay']) { final r? => parseRelayUrl(r), null => null });
+    if (path == oneClickPath) {
+      final bundle = params['bundle'];
+      return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle));
     }
-    final bundle = route.queryParameters['bundle'];
-    return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle));
+    return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions, remoteUrl: remote);
   }
 
   static Route<void> _route(RouteSettings settings) =>
@@ -114,7 +112,7 @@ class _HomeShellState extends State<HomeShell> {
     super.dispose();
   }
 
-  /// Switch page and put it in the address bar (`/flash`), so a reload or
+  /// Switch page and put it in the address bar (`#/flash`), so a reload or
   /// a shared link lands on the same page.
   void _select(Tool tool) {
     _tool = tool;

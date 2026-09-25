@@ -58,7 +58,8 @@ class RelayHost extends ChangeNotifier {
   Uri? get shareLink {
     final client = clientUrl;
     if (client == null) return null;
-    return Uri.parse(web.document.baseURI).resolve('flash').replace(queryParameters: {'remote': '$client'});
+    final route = Uri(path: '/flash', queryParameters: {'remote': '$client'});
+    return Uri.parse(web.document.baseURI).replace(fragment: '$route');
   }
 
   Future<void> start() async {

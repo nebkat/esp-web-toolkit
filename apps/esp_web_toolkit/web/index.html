@@ -33,14 +33,18 @@
   <link rel="manifest" href="manifest.json">
 
   <!--
-    GitHub Pages has no rewrites: a deep link such as /v1.2.3/oneclick?bundle=…
-    is served the site's 404.html, which sends it here as ?p=/oneclick?bundle=….
-    Put the route back before the app reads the URL.
+    The app's routes live in the fragment (#/oneclick?bundle=…). Links from
+    before that put the route in the path, /v1.2.3/oneclick?bundle=…: GitHub
+    Pages serves those the site's 404.html, which sends them here as
+    ?p=/oneclick?bundle=…. A query with no route (?remote=…) belonged to the
+    first page. Move either into the fragment before the app reads the URL.
   -->
   <script>
     (function () {
+      if (location.hash.indexOf('#/') === 0) return;
       var p = new URLSearchParams(location.search).get('p');
-      if (p !== null) history.replaceState(null, '', document.baseURI.replace(/\/$/, '') + p + location.hash);
+      var route = p !== null ? p : location.search ? '/' + location.search : null;
+      if (route !== null) history.replaceState(null, '', document.baseURI + '#' + route);
     })();
   </script>
 </head>

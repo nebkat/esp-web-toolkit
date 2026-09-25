@@ -9,7 +9,7 @@ import '../util/files.dart';
 import '../widgets/op_tile.dart';
 import '../widgets/port_picker.dart';
 
-/// The one-click flasher at `/oneclick`: a bundle (from `?bundle=<url>` or a picked file),
+/// The one-click flasher at `#/oneclick`: a bundle (from `?bundle=<url>` or a picked file),
 /// an outline of what it will do, Connect, Flash, done. Any bundle works —
 /// one by the filename convention, with or without a manifest of extras.
 /// The bundle's name and description are the

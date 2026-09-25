@@ -27,12 +27,15 @@ Uri? parseRelayUrl(String text) {
 }
 
 /// A shared device's address from what the user pasted: the link a relay
-/// page hands out (`…/flash?remote=<address>`) or the address itself
+/// page hands out (`…/#/flash?remote=<address>`, or `…/flash?remote=…`
+/// from before routes moved into the fragment) or the address itself
 /// (`wss://<relay>/c/<id>`). `null` if it is neither.
 Uri? parseRemoteAddress(String text) {
   String? fromLink;
   try {
-    fromLink = Uri.tryParse(text.trim())?.queryParameters['remote'];
+    final link = Uri.tryParse(text.trim());
+    fromLink = link?.queryParameters['remote'] ??
+        (link == null || link.fragment.isEmpty ? null : Uri.tryParse(link.fragment)?.queryParameters['remote']);
   } on FormatException {
     // Not a link with a query; try it as the address itself.
   }

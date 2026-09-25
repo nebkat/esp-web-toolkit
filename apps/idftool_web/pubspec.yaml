@@ -1,7 +1,7 @@
 name: idftool_web
 description: Browser UI for idftool-style operations on ESP-IDF devices over Web Serial.
 publish_to: none
-version: 0.1.0+1
+version: 0.2.0+2
 resolution: workspace
 
 environment:

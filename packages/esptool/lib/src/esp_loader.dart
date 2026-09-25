@@ -98,7 +98,7 @@ class EspLoader {
   /// [EspChip.imageChipId] as PID) — the stub must then use smaller blocks.
   /// [baudRate] is the transport's current rate, needed by [changeBaudRate].
   /// [latency] is the round trip the transport adds on top of the serial line
-  /// (a network relay, say); it is added to the loader's short timeouts.
+  /// (a network relay, say); it is added to every wait for a reply.
   EspLoader(this.transport, {this.usbOtg = false, int baudRate = 115200, this.latency = Duration.zero})
       : _reader = SlipReader(transport.input),
         _baudRate = baudRate;
@@ -217,7 +217,7 @@ class EspLoader {
     final syncPayload = Uint8List.fromList(
       [0x07, 0x07, 0x12, 0x20, ...List<int>.filled(32, 0x55)],
     );
-    final (value, _) = await command(op: EspCommand.sync, data: syncPayload, timeout: syncTimeout + latency);
+    final (value, _) = await command(op: EspCommand.sync, data: syncPayload, timeout: syncTimeout);
     // ROMs reply with some non-zero value; the stub replies 0. All-zero
     // replies mean the reset didn't take and we're still talking to a stub.
     _syncStubDetected = value == 0;
@@ -225,7 +225,7 @@ class EspLoader {
     // don't get mistaken for the next command's response.
     for (var i = 0; i < 7; i++) {
       try {
-        final (value, _) = await command(timeout: syncTimeout + latency);
+        final (value, _) = await command(timeout: syncTimeout);
         _syncStubDetected &= value == 0;
       } catch (_) {
         break;
@@ -290,7 +290,7 @@ class EspLoader {
     final data = _bytes([_u32(entrypoint == 0 ? 1 : 0), _u32(entrypoint)]);
     try {
       await checkCommand('leave RAM download mode',
-          op: EspCommand.memEnd, data: data, timeout: _isStub ? defaultTimeout : memEndRomTimeout + latency);
+          op: EspCommand.memEnd, data: data, timeout: _isStub ? defaultTimeout : memEndRomTimeout);
     } on EspException {
       if (_isStub) rethrow;
     } on TimeoutException {
@@ -334,7 +334,7 @@ class EspLoader {
 
     final Uint8List greeting;
     try {
-      greeting = await _reader.read(defaultTimeout);
+      greeting = await _read(defaultTimeout);
     } on TimeoutException catch (e) {
       throw EspException('Failed to start stub flasher: no response', e);
     }
@@ -387,7 +387,7 @@ class EspLoader {
     // Read responses until one matches the request (or, for op == null, the
     // first valid response). Some ROMs emit spurious frames in between.
     for (var retry = 0; retry < 100; retry++) {
-      final frame = await _reader.read(timeout);
+      final frame = await _read(timeout);
       if (frame.length < 8) continue;
       final header = ByteData.sublistView(frame);
       final direction = header.getUint8(0);
@@ -671,7 +671,7 @@ class EspLoader {
         op: EspCommand.readFlash, data: _bytes([_u32(offset), _u32(length), _u32(flashSectorSize), _u32(maxInFlight)]));
     var received = 0; // what the stub believes it has sent, sector by sector
     while (received < length) {
-      final frame = await _reader.read(defaultTimeout);
+      final frame = await _read(defaultTimeout);
       final nominal = (length - received).clamp(0, flashSectorSize);
       if (frame.length > nominal) throw EspProtocolException('Read more than expected');
       onFrame(received, frame.length > nominal ? Uint8List.sublistView(frame, 0, nominal) : frame);
@@ -680,7 +680,7 @@ class EspLoader {
       // acking what actually arrived would stall it forever after a drop.
       await transport.write(slipEncode(_u32(received)));
     }
-    final digest = await _reader.read(defaultTimeout);
+    final digest = await _read(defaultTimeout);
     if (digest.length != 16) throw EspProtocolException('Expected MD5 digest, got ${_hex(digest)}');
     return _hex(digest);
   }
@@ -914,6 +914,10 @@ class EspLoader {
     await transport.flushInput();
     _reader.flush();
   }
+
+  /// The next frame from the chip, allowing [timeout] plus the transport's
+  /// [latency].
+  Future<Uint8List> _read(Duration timeout) => _reader.read(timeout + latency);
 
   /// Release the transport subscription. Does not close the transport itself.
   Future<void> dispose() => _reader.dispose();

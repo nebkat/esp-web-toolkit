@@ -85,6 +85,18 @@ void main() {
   });
 
   group('command protocol', () {
+    test("a reply later than the timeout is still in time within the transport's latency", () async {
+      Future<int> readLate(Duration latency) {
+        final transport = FakeTransport();
+        final loader = EspLoader(transport, latency: latency);
+        Timer(const Duration(milliseconds: 150), () => transport.feedResponse(EspCommand.readReg, value: 42, payload: [0x00, 0x00]));
+        return loader.readReg(0x40001000, timeout: const Duration(milliseconds: 50));
+      }
+
+      await expectLater(readLate(Duration.zero), throwsA(isA<TimeoutException>()));
+      expect(await readLate(const Duration(milliseconds: 300)), 42);
+    });
+
     test('readReg parses the response value and sends the address', () async {
       final transport = FakeTransport();
       final loader = EspLoader(transport);

@@ -10,6 +10,7 @@ import 'package:web/web.dart' as web;
 
 import 'flash_plan.dart';
 import 'monitor_log.dart';
+import 'relay_socket.dart';
 
 export '../util/format.dart';
 export 'monitor_log.dart';
@@ -81,6 +82,22 @@ class DeviceSession extends ChangeNotifier {
 
   List<SerialPort> ports = const [];
   SerialPort? selectedPort;
+
+  /// A device another browser shares from its relay page
+  /// (`wss://<relay>/c/<id>`), from the link it handed out.
+  Uri? remoteUrl;
+
+  /// Whether the remote device, rather than [selectedPort], is the one to
+  /// connect to.
+  bool remoteSelected = false;
+
+  bool get _remote => remoteSelected && remoteUrl != null;
+
+  /// Whether there is a device to connect to.
+  bool get hasDevice => _remote || selectedPort != null;
+
+  /// What will be (or is) connected to, for the log.
+  String get deviceLabel => _remote ? 'the remote device at ${remoteUrl!.host}' : describePort(selectedPort!);
   ResetChoice reset = ResetChoice.auto;
   bool useStub = true;
 
@@ -116,7 +133,7 @@ class DeviceSession extends ChangeNotifier {
   }
 
   SessionState state = SessionState.disconnected;
-  WebSerialTransport? _transport;
+  EspTransport? _transport;
   EspLoader? _loader;
   IdfDevice? _device;
   EspChip? chip;
@@ -169,8 +186,8 @@ class DeviceSession extends ChangeNotifier {
     if (_awaitingPort != null) {
       unawaited(_reattachMonitor());
     } else if (selectedPort != null && !ports.contains(selectedPort)) {
-      if (connected) _lost('Port disconnected');
-      if (monitoring) _monitorDropped();
+      if (!_remote && connected) _lost('Port disconnected');
+      if (!_remote && monitoring) _monitorDropped();
       selectedPort = null;
     }
     selectedPort ??= ports.firstOrNull;
@@ -191,6 +208,19 @@ class DeviceSession extends ChangeNotifier {
 
   void selectPort(SerialPort? port) {
     selectedPort = port;
+    remoteSelected = false;
+    notifyListeners();
+  }
+
+  void selectRemote() {
+    remoteSelected = remoteUrl != null;
+    notifyListeners();
+  }
+
+  /// Use the shared device at [url] (`wss://<relay>/c/<id>`) as the port.
+  void setRemote(Uri url) {
+    remoteUrl = url;
+    remoteSelected = true;
     notifyListeners();
   }
 
@@ -233,17 +263,38 @@ class DeviceSession extends ChangeNotifier {
 
   static bool _isNativeUsb(SerialPort port) => port.getInfo().usbVendorId == 0x303A;
 
+  /// Open the selected port, or the remote device, at [baudRate].
+  Future<EspTransport> _open(int baudRate) async {
+    if (!_remote) return WebSerialTransport.open(selectedPort!, baudRate: baudRate);
+    final transport = await RemoteTransport.open(remoteUrl!, baudRate: baudRate);
+    unawaited(transport.socket.closed.then((_) {
+      if (!identical(_transport, transport)) return;
+      if (monitoring) {
+        _monitorDropped();
+      } else if (state == SessionState.connected) {
+        _lost('Remote device: ${transport.socket.closeReason}');
+        notifyListeners();
+      }
+    }));
+    return transport;
+  }
+
+  static bool _alive(EspTransport? transport) => switch (transport) {
+        WebSerialTransport t => t.port.connected,
+        RemoteTransport t => t.socket.isOpen,
+        _ => false,
+      };
+
   Future<void> connect() async {
-    final port = selectedPort;
-    if (port == null || portOpen || busy) return;
+    if (!hasDevice || portOpen || busy) return;
     state = SessionState.connecting;
     notifyListeners();
-    addLog('Connecting to ${describePort(port)} ...');
+    addLog('Connecting to $deviceLabel ...');
     try {
-      final transport = await WebSerialTransport.open(port);
+      final transport = await _open(115200);
       _transport = transport;
       _transportBaud = 115200;
-      await _startLoader(port, transport);
+      await _startLoader(transport);
     } catch (e) {
       addLog('Connect failed: $e', error: true);
       await _close();
@@ -254,15 +305,17 @@ class DeviceSession extends ChangeNotifier {
 
   /// Reset into the bootloader over the open [transport], sync, and bring up
   /// the loader, device and stub. Leaves the session connected, or throws.
-  Future<void> _startLoader(SerialPort port, WebSerialTransport transport) async {
+  Future<void> _startLoader(EspTransport transport) async {
     final stopwatch = Stopwatch()..start();
     {
-      final info = port.getInfo();
-      final usbOtg = _isNativeUsb(port) && EspChip.values.any((c) => c.imageChipId == info.usbProductId);
-      final loader = EspLoader(transport, usbOtg: usbOtg);
+      final port = _remote ? null : selectedPort!;
+      final info = port?.getInfo();
+      final usbOtg = port != null && _isNativeUsb(port) && EspChip.values.any((c) => c.imageChipId == info!.usbProductId);
+      // A relay adds a network round trip to every reply.
+      final loader = EspLoader(transport, usbOtg: usbOtg, latency: port == null ? const Duration(milliseconds: 500) : Duration.zero);
       _loader = loader;
 
-      final strategies = _strategies(port);
+      final strategies = resetStrategies(port);
       EspChip? detected;
       Object? lastError;
       for (final (strategy, name) in strategies) {
@@ -294,7 +347,7 @@ class DeviceSession extends ChangeNotifier {
         await loader.runStub();
       }
       mac = await loader.readMac();
-      identities[port] = PortIdentity(chip: detected, mac: macString);
+      if (port != null) identities[port] = PortIdentity(chip: detected, mac: macString);
       final id = await loader.flashId();
       flashId = _hex(id, 6);
       addLog('Connected: ${detected.name}, ${flashSize == null ? 'unknown flash size' : _mb(flashSize!)} flash, '
@@ -307,12 +360,15 @@ class DeviceSession extends ChangeNotifier {
   String? get macString => _formatMac(mac);
   static String? _formatMac(Uint8List? mac) => mac?.map((b) => b.toRadixString(16).padLeft(2, '0')).join(':');
 
-  List<(EspReset, String)> _strategies(SerialPort port) => switch (reset) {
+  /// A remote host recognises the classic sequence and runs its own reset
+  /// locally, so that is the only one sent to it.
+  List<(EspReset, String)> resetStrategies(SerialPort? port) => switch (reset) {
+        ResetChoice.none => [(EspResets.none, 'no')],
+        _ when port == null => [(EspResets.classic(), 'remote')],
         ResetChoice.auto =>
           _isNativeUsb(port) ? [(EspResets.usbJtag(), 'USB-JTAG'), (EspResets.classic(), 'classic')] : [(EspResets.classic(), 'classic'), (EspResets.usbJtag(), 'USB-JTAG')],
         ResetChoice.usbJtag => [(EspResets.usbJtag(), 'USB-JTAG')],
         ResetChoice.classic => [(EspResets.classic(), 'classic')],
-        ResetChoice.none => [(EspResets.none, 'no')],
       };
 
   /// Probe every granted port that isn't the live connection: reset into the
@@ -345,7 +401,7 @@ class DeviceSession extends ChangeNotifier {
     final loader = EspLoader(transport);
     try {
       EspChip? chip;
-      for (final (strategy, _) in _strategies(port)) {
+      for (final (strategy, _) in resetStrategies(port)) {
         try {
           chip = await loader.connect(reset: strategy, attempts: 2).timeout(const Duration(seconds: 8));
           break;
@@ -393,8 +449,7 @@ class DeviceSession extends ChangeNotifier {
   /// bootloader, the chip is reset into its app on the open port; otherwise
   /// the port is opened and, unless [reset] is false, the chip reset.
   Future<void> startMonitor({bool reset = true}) async {
-    final port = selectedPort;
-    if (port == null || monitoring || busy) return;
+    if (!hasDevice || monitoring || busy) return;
     final fromLoader = connected;
     reset |= fromLoader;
     state = SessionState.connecting;
@@ -408,7 +463,7 @@ class DeviceSession extends ChangeNotifier {
         flashSize = null;
         flashId = null;
       } else {
-        _transport = await WebSerialTransport.open(port, baudRate: monitorBaud);
+        _transport = await _open(monitorBaud);
         _transportBaud = monitorBaud;
       }
       final transport = _transport!;
@@ -419,7 +474,7 @@ class DeviceSession extends ChangeNotifier {
       _listenMonitor(transport);
       monitorLog.note('── Monitoring at $monitorBaud baud${reset ? ', resetting into the app' : ''}');
       state = SessionState.monitoring;
-      addLog('Monitoring ${describePort(port)} at $monitorBaud baud');
+      addLog('Monitoring $deviceLabel at $monitorBaud baud');
       if (reset) {
         await _resetOrDrop(transport);
       } else {
@@ -459,9 +514,8 @@ class DeviceSession extends ChangeNotifier {
     await _stopListening();
     monitorLog.flush();
     monitorLog.note('── Monitor stopped');
-    final port = selectedPort;
     final transport = _transport;
-    if (!enterBootloader || monitorWaiting || port == null || transport == null) {
+    if (!enterBootloader || monitorWaiting || !hasDevice || transport == null) {
       await _close();
       state = SessionState.disconnected;
       addLog('Monitor stopped');
@@ -476,7 +530,7 @@ class DeviceSession extends ChangeNotifier {
         await transport.setBaudRate(115200);
         _transportBaud = 115200;
       }
-      await _startLoader(port, transport);
+      await _startLoader(transport);
     } catch (e) {
       addLog('Connect failed: $e', error: true);
       await _close();
@@ -485,7 +539,7 @@ class DeviceSession extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _listenMonitor(WebSerialTransport transport) {
+  void _listenMonitor(EspTransport transport) {
     _monitorSubscription = transport.input.listen(monitorLog.add, onError: (Object _) => _monitorDropped());
   }
 
@@ -498,13 +552,21 @@ class DeviceSession extends ChangeNotifier {
   /// Pulse EN with GPIO0 released (RTS high, DTR low, together), as
   /// `idf.py monitor` resets into the app. A native-USB chip may drop off the
   /// bus doing so; that is handled as a dropped port, not an error.
-  Future<void> _resetOrDrop(WebSerialTransport transport) async {
+  Future<void> _resetOrDrop(EspTransport transport) async {
     try {
-      await transport.port.setSignals(SerialOutputSignals(dataTerminalReady: false, requestToSend: true)).toDart;
-      await Future<void>.delayed(const Duration(milliseconds: 100));
-      await transport.port.setSignals(SerialOutputSignals(dataTerminalReady: false, requestToSend: false)).toDart;
+      if (transport is WebSerialTransport) {
+        await transport.port.setSignals(SerialOutputSignals(dataTerminalReady: false, requestToSend: true)).toDart;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+        await transport.port.setSignals(SerialOutputSignals(dataTerminalReady: false, requestToSend: false)).toDart;
+      } else {
+        // The remote host sees RTS released outside download mode and
+        // resets the chip itself.
+        await transport.setDtr(false);
+        await transport.setRts(true);
+        await transport.setRts(false);
+      }
     } catch (e) {
-      if (transport.port.connected) {
+      if (_alive(transport)) {
         addLog('Reset failed: $e', error: true);
       } else {
         _monitorDropped();
@@ -513,8 +575,10 @@ class DeviceSession extends ChangeNotifier {
   }
 
   /// Deassert DTR and RTS together, which opening the port may have
-  /// asserted, so the chip is neither held in reset nor reset.
-  Future<void> _releaseLines(WebSerialTransport transport) async {
+  /// asserted, so the chip is neither held in reset nor reset. A remote
+  /// host keeps its own lines released.
+  Future<void> _releaseLines(EspTransport transport) async {
+    if (transport is! WebSerialTransport) return;
     try {
       await transport.port.setSignals(SerialOutputSignals(dataTerminalReady: false, requestToSend: false)).toDart;
     } catch (_) {}
@@ -525,7 +589,15 @@ class DeviceSession extends ChangeNotifier {
   void _monitorDropped() {
     if (!monitoring || _awaitingPort != null) return;
     final transport = _transport;
-    final info = transport?.port.getInfo();
+    if (transport is RemoteTransport) {
+      // The host waits for its own port; losing the relay ends the monitor.
+      monitorLog.flush();
+      monitorLog.note('── Remote device: ${transport.socket.closeReason}');
+      _lost('Remote device: ${transport.socket.closeReason}');
+      notifyListeners();
+      return;
+    }
+    final info = transport is WebSerialTransport ? transport.port.getInfo() : null;
     final since = DateTime.now();
     _awaitingPort = (vendor: info?.usbVendorId, product: info?.usbProductId, since: since);
     monitorLog.flush();
@@ -586,11 +658,17 @@ class DeviceSession extends ChangeNotifier {
     }
   }
 
-  static Future<void> _closeQuietly(WebSerialTransport transport) async {
+  static Future<void> _closeQuietly(EspTransport transport) async {
     try {
-      await transport.close().timeout(const Duration(seconds: 3));
+      await _closeTransport(transport).timeout(const Duration(seconds: 3));
     } catch (_) {}
   }
+
+  static Future<void> _closeTransport(EspTransport? transport) async => switch (transport) {
+        WebSerialTransport t => await t.close(),
+        Rfc2217Transport t => await t.close(),
+        _ => null,
+      };
 
   void _lost(String why) {
     addLog(why, error: true);
@@ -613,7 +691,7 @@ class DeviceSession extends ChangeNotifier {
     flashId = null;
     await loader?.dispose();
     try {
-      await transport?.close().timeout(const Duration(seconds: 5));
+      await _closeTransport(transport).timeout(const Duration(seconds: 5));
     } catch (_) {}
   }
 
@@ -641,7 +719,7 @@ class DeviceSession extends ChangeNotifier {
       addLog('$label failed: $e', error: true);
       // Only a port that has actually gone away means the connection is
       // lost; anything else (protocol, input or a bug) leaves it usable.
-      if (!(_transport?.port.connected ?? false)) _lost('Connection lost');
+      if (!_alive(_transport)) _lost('Connection lost');
       return null;
     } finally {
       if (state == SessionState.busy) state = SessionState.connected;

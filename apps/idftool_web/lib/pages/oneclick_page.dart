@@ -515,8 +515,8 @@ class _OneClickPageState extends State<OneClickPage> {
             onPressed: session.busy
                 ? null
                 : () async {
-                    if (session.selectedPort == null) await session.requestPort();
-                    if (session.selectedPort != null) await session.connect();
+                    if (!session.hasDevice) await session.requestPort();
+                    if (session.hasDevice) await session.connect();
                   },
             icon: session.busy ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.usb),
             label: Text(session.busy ? 'Connecting…' : 'Connect device'),

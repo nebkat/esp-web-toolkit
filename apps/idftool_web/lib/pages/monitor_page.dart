@@ -123,11 +123,11 @@ class _MonitorPageState extends State<MonitorPage> {
             onSelected: (v) => setState(() => _resetOnStart = v),
           ),
         FilledButton.icon(
-          onPressed: busy || session.selectedPort == null ? null : () => session.startMonitor(reset: _resetOnStart),
+          onPressed: busy || !session.hasDevice ? null : () => session.startMonitor(reset: _resetOnStart),
           icon: const Icon(Icons.play_arrow),
           label: Text(session.connected ? 'Reset into app & monitor' : 'Start monitor'),
         ),
-        if (session.selectedPort == null) const Text('Choose a port in the bar above first.'),
+        if (!session.hasDevice) const Text('Choose a port in the bar above first.'),
       ] else ...[
         Chip(
           avatar: session.monitorWaiting

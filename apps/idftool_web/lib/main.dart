@@ -9,7 +9,9 @@ import 'pages/inspect_page.dart';
 import 'pages/monitor_page.dart';
 import 'pages/oneclick_page.dart';
 import 'pages/partitions_page.dart';
+import 'pages/relay_page.dart';
 import 'session/device_session.dart';
+import 'session/relay_socket.dart';
 import 'util/files.dart';
 import 'theme.dart';
 import 'widgets/connection_bar.dart';
@@ -28,19 +30,28 @@ class IdfToolApp extends StatelessWidget {
   /// hand out, with the bundle's absolute URL.
   static const oneClickPath = '/oneclick';
 
+  /// The page that shares a device through a relay; it hands out links to
+  /// the full tool with `?remote=<relay>/c/<id>`.
+  static const relayPath = '/relay';
+
   /// Which page a route name (the URL, relative to the base href) opens:
   /// [oneClickPath] is the one-click flasher, `/<tool>` (`/flash`, say) the
   /// full tool on that page, anything else the full tool on its first page.
-  /// The older `#/oneclick?bundle=<url>` fragment form still works.
+  /// [relayPath] shares a device; `?remote=<ws url>` on the full tool uses
+  /// one shared that way. The older `#/oneclick?bundle=<url>` fragment form still works.
   static Widget _entry(String name) {
-    if (!DeviceSession.supported) return const UnsupportedBrowserPage();
     var route = Uri.tryParse(name);
     final path = route?.path.replaceAll(RegExp(r'/+$'), '');
+    final remoteParam = Uri.base.queryParameters['remote'];
+    final remote = remoteParam == null ? null : parseRemoteAddress(remoteParam);
+    // A remote device needs no Web Serial on this end.
+    if (!DeviceSession.supported && (remote == null || path == oneClickPath || path == relayPath)) return const UnsupportedBrowserPage();
+    if (path == relayPath) return const RelayShell();
     if (route == null || path != oneClickPath) {
       final fragment = Uri.base.fragment;
       final legacy = fragment.isEmpty ? null : Uri.tryParse(fragment.startsWith('/') ? fragment : '/$fragment');
       if (legacy == null || legacy.path != oneClickPath) {
-        return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions);
+        return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions, remoteUrl: remote);
       }
       route = legacy;
     }
@@ -79,15 +90,20 @@ enum Tool {
 }
 
 class HomeShell extends StatefulWidget {
-  const HomeShell({super.key, this.initialTool = Tool.partitions});
+  const HomeShell({super.key, this.initialTool = Tool.partitions, this.remoteUrl});
   final Tool initialTool;
+
+  /// A shared device to offer, and select, in place of a local port.
+  final Uri? remoteUrl;
 
   @override
   State<HomeShell> createState() => _HomeShellState();
 }
 
 class _HomeShellState extends State<HomeShell> {
-  final _session = DeviceSession();
+  late final _session = DeviceSession()
+    ..remoteUrl = widget.remoteUrl
+    ..remoteSelected = widget.remoteUrl != null;
   late Tool _tool = widget.initialTool;
   String? _dataPartition;
   PickedFile? _dataFile;
@@ -102,7 +118,8 @@ class _HomeShellState extends State<HomeShell> {
   /// a shared link lands on the same page.
   void _select(Tool tool) {
     _tool = tool;
-    SystemNavigator.routeInformationUpdated(uri: Uri(path: '/${tool.name}'));
+    final remote = _session.remoteUrl;
+    SystemNavigator.routeInformationUpdated(uri: Uri(path: '/${tool.name}', queryParameters: remote == null ? null : {'remote': '$remote'}));
     setState(() {});
   }
 

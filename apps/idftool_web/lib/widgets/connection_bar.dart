@@ -67,7 +67,7 @@ class ConnectionBar extends StatelessWidget {
                 ),
               ] else if (!session.connected)
                 FilledButton.icon(
-                  onPressed: session.busy || session.selectedPort == null
+                  onPressed: session.busy || !session.hasDevice
                       ? null
                       : session.connect,
                   icon: session.busy

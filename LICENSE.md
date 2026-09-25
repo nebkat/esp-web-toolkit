@@ -5,7 +5,7 @@ directory carries its own `LICENSE` file.
 
 | Directory | License |
 |---|---|
-| `apps/idftool_web` (the ESP Web Toolkit app) | [GNU AGPL-3.0-or-later](apps/idftool_web/LICENSE) |
+| `apps/esp_web_toolkit` (the ESP Web Toolkit app) | [GNU AGPL-3.0-or-later](apps/esp_web_toolkit/LICENSE) |
 | `packages/esptool` (a port of Espressif's esptool, itself GPL-2.0-or-later) | [GPL-2.0-or-later](packages/esptool/LICENSE) |
 | `packages/esp_defs`, `packages/esptool_libserialport`, `packages/idftool`, `packages/esp_monitor`, `packages/littlefs`, `packages/spiffs`, `packages/fatfs` | [BSD-3-Clause](packages/esp_defs/LICENSE) |
 

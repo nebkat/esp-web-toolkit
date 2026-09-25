@@ -1,3 +1,3 @@
-# idftool_web
+# esp_web_toolkit
 
 A new Flutter project.

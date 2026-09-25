@@ -15,5 +15,5 @@ install. Needs Chrome, Edge or Opera on a desktop computer.
 
 ## License
 
-The app is [AGPL-3.0-or-later](apps/idftool_web/LICENSE); the packages under
+The app is [AGPL-3.0-or-later](apps/esp_web_toolkit/LICENSE); the packages under
 `packages/` have their own licenses, see [LICENSE.md](LICENSE.md).

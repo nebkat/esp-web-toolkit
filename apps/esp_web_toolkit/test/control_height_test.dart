@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:idftool_web/theme.dart';
-import 'package:idftool_web/widgets/dropdown.dart';
+import 'package:esp_web_toolkit/theme.dart';
+import 'package:esp_web_toolkit/widgets/dropdown.dart';
 
 void main() {
   testWidgets('buttons, dropdowns and text fields share one height', (tester) async {

@@ -4,7 +4,7 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:idftool/idftool.dart';
-import 'package:idftool_web/util/inspect.dart';
+import 'package:esp_web_toolkit/util/inspect.dart';
 
 void main() {
   final fixtures = Directory('../../packages/idftool/test/fixtures');

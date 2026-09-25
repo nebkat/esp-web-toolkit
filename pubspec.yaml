@@ -1,4 +1,4 @@
-name: esp_web_toolkit
+name: esp_web_toolkit_workspace
 description: Dart/Flutter tooling for Espressif chips — chip and image definitions, esptool protocol, idftool port, and the ESP Web Toolkit app.
 publish_to: none
 
@@ -14,4 +14,4 @@ workspace:
   - packages/littlefs
   - packages/spiffs
   - packages/fatfs
-  - apps/idftool_web
+  - apps/esp_web_toolkit

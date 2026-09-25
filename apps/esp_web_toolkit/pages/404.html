@@ -10,11 +10,12 @@
 
     - /v1.2.3/<route>: a route of that version's app (/v1.2.3/oneclick).
       Sent to the version's index.html as ?p=<route>, which restores it.
-    - Anything else is a link from before versions, and opens in LEGACY.
+    - Anything else is an unversioned link, and opens in the latest version
+      (LATEST, filled in by the Pages workflow when it publishes).
   -->
   <script>
     var SITE = '/esp-web-toolkit/';
-    var LEGACY = 'v0.1.0';
+    var LATEST = '%LATEST%';
 
     var params = new URLSearchParams(location.search);
     var path = location.pathname.indexOf(SITE) === 0 ? location.pathname.slice(SITE.length) : '';
@@ -22,7 +23,7 @@
     var route = match ? match[2] || '/' : '/' + path;
     // Already redirected once (no such version), or a missing file: stop here.
     if (!params.has('p') && !/\.[a-z0-9]+$/i.test(route)) {
-      location.replace(SITE + (match ? match[1] : LEGACY) + '/?p=' + encodeURIComponent(route + location.search) + location.hash);
+      location.replace(SITE + (match ? match[1] : LATEST) + '/?p=' + encodeURIComponent(route + location.search) + location.hash);
     }
   </script>
 </head>

@@ -8,8 +8,8 @@
 # so the canvaskit/ folder of the build is not published.
 #
 # The branch root holds apps/esp_web_toolkit/pages: 404.html sends deep links
-# (/v1.2.3/oneclick) to their version, and links from before versions to
-# the version they were made with.
+# (/v1.2.3/oneclick) to their version, and unversioned links, with their
+# query and fragment, to the latest published version.
 name: Pages
 
 on:
@@ -68,6 +68,9 @@ jobs:
           cp -R apps/esp_web_toolkit/build/web "$site/$VERSION"
           rm -rf "$site/$VERSION/canvaskit"
           cp apps/esp_web_toolkit/pages/index.html apps/esp_web_toolkit/pages/404.html "$site/"
+          # The highest version published, not necessarily this one.
+          latest=$(cd "$site" && ls -d v*/ | tr -d / | sort -V | tail -n 1)
+          sed -i "s/%LATEST%/$latest/g" "$site/index.html" "$site/404.html"
           touch "$site/.nojekyll"
           cd "$site"
           git config user.name 'github-actions[bot]'

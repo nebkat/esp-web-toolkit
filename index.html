@@ -5,18 +5,16 @@
   <title>ESP Web Toolkit</title>
   <!--
     The site root (see 404.html): opens the latest version, keeping the
-    query and fragment. The oldest one-click links put the route in the
-    fragment (#/oneclick?bundle=…); they become the path form. The Pages
-    workflow fills in LATEST when it publishes.
+    query and fragment. The fragment (#/flash?remote=…) stays a fragment,
+    so what it carries never reaches the server. The Pages workflow fills
+    in LATEST when it publishes.
   -->
   <script>
-    var LATEST = 'v0.3.1';
-    location.replace(location.hash.indexOf('#/') === 0
-      ? LATEST + '/?p=' + encodeURIComponent(location.hash.slice(1))
-      : LATEST + '/' + location.search + location.hash);
+    var LATEST = 'v0.4.0';
+    location.replace(LATEST + '/' + location.search + location.hash);
   </script>
 </head>
 <body>
-  <p><a href="v0.3.1/">ESP Web Toolkit</a></p>
+  <p><a href="v0.4.0/">ESP Web Toolkit</a></p>
 </body>
 </html>

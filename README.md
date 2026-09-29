@@ -5,6 +5,8 @@
 Work on Espressif devices from the browser, over USB, with nothing to
 install. Needs Chrome, Edge or Opera on a desktop computer.
 
+Prefer the command line? See [**idftool**](https://github.com/nebkat/idftool).
+
 - **Partitions** — view the device's partition table and flash map.
 - **Flash** — plan and flash a partition table, bootloader, app (factory or OTA), partition images, erases, NVS values and filesystem files in one go. Only changed sectors are written.
 - **Data** — browse and edit NVS (including encrypted) and LittleFS, SPIFFS and FAT filesystems.

@@ -151,10 +151,13 @@ class DeviceSession extends ChangeNotifier {
   final Map<SerialPort, PortIdentity> identities = {};
   bool _identifying = false;
 
-  /// [describePort] plus whatever [identities] knows about it.
+  /// [describePort] plus whatever [identities] knows about it. An identified
+  /// chip and MAC lead, so a narrow field cuts off the adapter name instead.
   String labelFor(SerialPort port) {
     final id = identities[port];
-    return id == null ? describePort(port) : '${describePort(port)} — ${id.label}';
+    if (id == null) return describePort(port);
+    if (id.chip != null && id.error == null) return '${id.label} — ${describePort(port)}';
+    return '${describePort(port)} — ${id.label}';
   }
 
   /// Changes queued for the connected device (see [FlashPlan]); also holds

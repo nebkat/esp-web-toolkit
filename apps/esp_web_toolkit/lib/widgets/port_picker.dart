@@ -6,15 +6,15 @@ import 'dropdown.dart';
 import 'port_item.dart';
 import 'remote_dialog.dart';
 
-/// The granted serial ports as a dropdown, with a last entry that asks the
-/// browser for access to another one (Web Serial only exposes ports the
-/// user has explicitly granted), the remote device if there is one, and an
-/// entry that asks for a remote device's address.
+/// The granted serial ports as a dropdown, then the remote device if there is
+/// one, an entry that asks the browser for access to another port (Web Serial
+/// only exposes ports the user has explicitly granted), and one that asks for a
+/// remote device's address.
 ///
 /// [allowRemote] is off where a remote device makes no sense (the page that
 /// shares a local one).
 class PortPicker extends StatefulWidget {
-  const PortPicker({super.key, required this.session, this.width = 420, this.enabled = true, this.allowRemote = true});
+  const PortPicker({super.key, required this.session, this.width = 640, this.enabled = true, this.allowRemote = true});
   final DeviceSession session;
   final double width;
   final bool enabled;
@@ -52,9 +52,9 @@ class _PortPickerState extends State<PortPicker> {
         for (final (i, p) in session.ports.indexed)
           DropdownMenuEntry(value: i, label: session.labelFor(p), labelWidget: PortItem(session: session, port: p)),
         if (widget.allowRemote && remote != null)
-          DropdownMenuEntry(value: _remote, label: 'Remote device via ${remote.host}', leadingIcon: const Icon(Icons.cloud_outlined)),
-        if (widget.allowRemote) const DropdownMenuEntry(value: _askRemote, label: 'Connect to a remote device…', leadingIcon: Icon(Icons.add_link)),
+          DropdownMenuEntry(value: _remote, label: 'Remote device via ${remote.host}', leadingIcon: const Icon(Icons.cloud)),
         if (serial != null) const DropdownMenuEntry(value: _grant, label: 'Grant access to another port…', leadingIcon: Icon(Icons.usb)),
+        if (widget.allowRemote) const DropdownMenuEntry(value: _askRemote, label: 'Connect to a remote device…', leadingIcon: Icon(Icons.cloud_outlined)),
       ],
       onSelected: (v) {
         if (v == null) return;

@@ -13,7 +13,8 @@ enum RelayState { idle, starting, sharing }
 
 /// Shares the port selected in [session] through a relay server: the port
 /// is served over RFC 2217 ([Rfc2217Server]) to whoever opens the link.
-/// Knowing the link's random id is all it takes to connect.
+/// Knowing the link's random id is all it takes to connect, unless the
+/// relay hands out a [link] of its own (one that signs the client in).
 ///
 /// [session] only supplies the ports, the reset choice and the log; it
 /// never opens the port itself.
@@ -30,7 +31,12 @@ class RelayHost extends ChangeNotifier {
   /// The relay's id for this share, once it has sent it.
   String? sessionId;
 
-  /// The connected client's address, while one is connected.
+  /// The link the relay hands out for this share, if it sends one (one
+  /// that signs the client in before sending it on to the tool).
+  Uri? link;
+
+  /// The connected client, while one is connected: who they are signed in
+  /// as, if the relay says, and their address.
   String? peer;
 
   /// The port went away (a native-USB chip re-enumerating) and the share
@@ -54,8 +60,10 @@ class RelayHost extends ChangeNotifier {
   /// Where a client connects, once the relay has assigned an id.
   Uri? get clientUrl => sessionId == null ? null : _endpoint('c/$sessionId');
 
-  /// The link to hand out: the full tool, with this device as its port.
+  /// The link to hand out: the relay's [link], or else the full tool, with
+  /// this device as its port.
   Uri? get shareLink {
+    if (link case final link?) return link;
     final client = clientUrl;
     if (client == null) return null;
     final route = Uri(path: '/flash', queryParameters: {'remote': '$client'});
@@ -122,8 +130,10 @@ class RelayHost extends ChangeNotifier {
     switch (message['type']) {
       case 'session':
         sessionId = message['id'] as String?;
+        link = switch (message['link']) { final String l => Uri.tryParse(l), _ => null };
       case 'open':
-        peer = message['addr'] as String? ?? 'unknown address';
+        final addr = message['addr'] as String? ?? 'unknown address';
+        peer = switch (message['user']) { final String user => '$user ($addr)', _ => addr };
         server.clientConnected();
         session.addLog('Client connected from $peer');
       case 'close':
@@ -190,6 +200,7 @@ class RelayHost extends ChangeNotifier {
     } catch (_) {}
     _port = null;
     sessionId = null;
+    link = null;
     peer = null;
     waitingForPort = false;
   }

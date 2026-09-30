@@ -7,5 +7,6 @@ library;
 
 export 'src/app_description.dart';
 export 'src/chip.dart';
+export 'src/efuse.dart';
 export 'src/image_metadata.dart';
 export 'src/reset_reason.dart';

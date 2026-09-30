@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:idftool/idftool.dart' show PartitionTable;
 
 import 'pages/data_page.dart';
+import 'pages/efuse_page.dart';
 import 'pages/flash_page.dart';
 import 'pages/inspect_page.dart';
 import 'pages/monitor_page.dart';
@@ -80,6 +81,7 @@ enum Tool {
   flash('Flash', Icons.flash_on),
   data('Data', Icons.storage),
   monitor('Monitor', Icons.terminal),
+  efuse('eFuses', Icons.memory),
   inspect('Inspect', Icons.search);
 
   const Tool(this.label, this.icon);
@@ -159,6 +161,7 @@ class _HomeShellState extends State<HomeShell> {
           Tool.flash => FlashPage(session: _session),
           Tool.data => DataPage(key: ValueKey((_dataPartition, _dataFile)), session: _session, initialPartition: _dataPartition, initialFile: _dataFile),
           Tool.monitor => MonitorPage(session: _session),
+          Tool.efuse => EfusePage(session: _session),
           Tool.inspect => InspectPage(
               session: _session,
               onPlanTable: _planTable,

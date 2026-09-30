@@ -140,6 +140,10 @@ class DeviceSession extends ChangeNotifier {
   int? flashSize;
   Uint8List? mac;
   String? flashId;
+
+  /// The chip's eFuses, once [readEfuses] has run on this connection.
+  EfuseValues? efuses;
+  bool _efusesAttempted = false;
   Progress? progress;
   String? currentOperation;
 
@@ -338,6 +342,7 @@ class DeviceSession extends ChangeNotifier {
       final device = IdfDevice(loader);
       _device = device;
       _layoutAttempted = false;
+      _efusesAttempted = false;
       for (final note in plan.attach(
         chip: detected,
         partitionTableOffset: device.partitionTableOffset,
@@ -692,6 +697,7 @@ class DeviceSession extends ChangeNotifier {
     flashSize = null;
     mac = null;
     flashId = null;
+    efuses = null;
     await loader?.dispose();
     try {
       await _closeTransport(transport).timeout(const Duration(seconds: 5));
@@ -760,6 +766,18 @@ class DeviceSession extends ChangeNotifier {
     if (!connected || busy || _layoutAttempted) return;
     _layoutAttempted = true;
     unawaited(readLayout());
+  }
+
+  /// Read every eFuse block into [efuses].
+  Future<void> readEfuses() => run('Read eFuses', (loader) async {
+        efuses = await loader.readEfuses(onProgress: (done, total) => reportProgress('Reading eFuses', done, total));
+      });
+
+  /// [readEfuses] once per connection, as [ensureLayout].
+  void ensureEfuses() {
+    if (!connected || busy || _efusesAttempted) return;
+    _efusesAttempted = true;
+    unawaited(readEfuses());
   }
 
   /// `<chip>-<mac>`, for naming files dumped from the device.

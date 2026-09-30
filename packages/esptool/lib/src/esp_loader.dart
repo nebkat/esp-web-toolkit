@@ -903,6 +903,28 @@ class EspLoader {
     return packed.buffer.asUint8List(2, 6);
   }
 
+  /// Read every eFuse block, one register at a time, and decode them against
+  /// the chip's table. Read-protected key blocks come back as zeros.
+  Future<EfuseValues> readEfuses({void Function(int done, int total)? onProgress}) async {
+    final chip = _chip;
+    final table = chip == null ? null : efuseTableFor(chip);
+    if (chip == null || table == null) {
+      throw EspException('eFuse read is not supported for ${chip?.name ?? 'this chip'}');
+    }
+    final total = table.blocks.fold(0, (n, b) => n + b.words);
+    var done = 0;
+    final blocks = <int, Uint32List>{};
+    for (final block in table.blocks) {
+      final words = Uint32List(block.words);
+      for (var i = 0; i < block.words; i++) {
+        words[i] = await readReg(table.wordAddress(block, i));
+        onProgress?.call(++done, total);
+      }
+      blocks[block.index] = words;
+    }
+    return EfuseValues.decode(chip, blocks);
+  }
+
   /// Ask the chip to switch to [baud], then update the host transport to match.
   Future<void> changeBaudRate(int baud) async {
     // ROM expects (new_baud, 0); the stub wants the current rate as the second

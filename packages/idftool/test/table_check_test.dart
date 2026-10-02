@@ -151,6 +151,16 @@ fctry,    data, nvs,     0x230000, 0x6000
       }),
     });
     expect(checkBundle(erase, device).conflicts, hasLength(1));
+    final editFs = bundle({
+      '@ota.bin': Uint8List(4),
+      'files/a': Uint8List(1),
+      'manifest.json': jsonEncode({
+        'ops': [
+          {'op': 'edit-fs', 'partition': 'ota_1', 'put': {'/a': 'files/a'}},
+        ],
+      }),
+    });
+    expect(checkBundle(editFs, device).conflicts, hasLength(1));
 
     // @factory owns ota_0 when there is no factory partition; other names are fine.
     expect(checkBundle(bundle({'@factory.bin': Uint8List(4), 'ota_0.bin': Uint8List(4)}), device).conflicts, hasLength(1));

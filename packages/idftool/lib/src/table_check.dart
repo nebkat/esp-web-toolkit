@@ -262,7 +262,12 @@ BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable) {
             table: current,
             namedPartitions: [
               for (final step in bundle.steps)
-                if (step case WritePartitionStep(:final partition) || EraseStep(:final partition)) partition,
+                if (step
+                    case WritePartitionStep(:final partition) ||
+                        EraseStep(:final partition) ||
+                        WriteFsStep(:final partition) ||
+                        EditFsStep(:final partition))
+                  partition,
             ],
             hasFactory: bundle.contents.factoryApp != null,
             hasOta: bundle.contents.otaApp != null,

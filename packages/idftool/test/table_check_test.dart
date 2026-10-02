@@ -135,4 +135,27 @@ fctry,    data, nvs,     0x230000, 0x6000
     expect(checkBundle(ops, device).missing.values, ["'coredump' is not a partition on this device"]);
     expect(checkBundle(ops, null).missing.length, 3);
   });
+
+  test('a named write or erase of a partition a role file picks blocks the flash', () {
+    final device = table(layout);
+    // @ota may pick any slot, so writing or erasing one by name collides.
+    final ota = checkBundle(bundle({'@ota.bin': Uint8List(4), 'ota_1.bin': Uint8List(4)}), device);
+    expect(ota.conflicts.single, contains("'ota_1'"));
+    expect(ota.blocker, ota.conflicts.single);
+    final erase = bundle({
+      '@ota.bin': Uint8List(4),
+      'manifest.json': jsonEncode({
+        'ops': [
+          {'op': 'erase', 'partition': 'ota_0'},
+        ],
+      }),
+    });
+    expect(checkBundle(erase, device).conflicts, hasLength(1));
+
+    // @factory owns ota_0 when there is no factory partition; other names are fine.
+    expect(checkBundle(bundle({'@factory.bin': Uint8List(4), 'ota_0.bin': Uint8List(4)}), device).conflicts, hasLength(1));
+    final fine = checkBundle(bundle({'@factory.bin': Uint8List(4), 'ota_1.bin': Uint8List(4), 'storage.bin': Uint8List(4)}), device);
+    expect(fine.conflicts, isEmpty);
+    expect(fine.blocker, isNull);
+  });
 }

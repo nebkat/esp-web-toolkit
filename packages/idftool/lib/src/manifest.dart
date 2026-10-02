@@ -426,8 +426,10 @@ typedef FlashStepCallback = void Function(int index, FlashStep step);
 /// first failure; [onStep] fires as each step starts.
 ///
 /// Before anything is written the bundle is checked against the device's
-/// table ([checkBundle]): a partition it names that will not exist, or an
-/// incompatible table under [TablePolicy.require], stops it there. For a
+/// table ([checkBundle]): a partition it names that will not exist, a named
+/// write or erase that collides with a role file, or an incompatible table
+/// under [TablePolicy.require], stops it there. So does an app or bootloader
+/// image built for another chip. For a
 /// differing table under [TablePolicy.ask], [chooseTable] decides: update it,
 /// keep the device's (where [BundleCheck.canKeepLayout]), or `null` to flash
 /// nothing (as without a callback). A table that already matches, or one
@@ -453,6 +455,22 @@ Future<void> runFlashBundle(
   final choice = check.automaticChoice ?? await chooseTable?.call(check);
   if (choice == null || (choice == TableChoice.keep && check.tableChanges && !check.canKeepLayout)) {
     throw IdfToolException("The device's partition layout differs and updating it was not agreed");
+  }
+  final table = check.table ?? check.deviceTable;
+  for (final step in bundle.steps) {
+    switch (step) {
+      case FactoryStep(:final file) || OtaStep(:final file):
+        device.validateImageChip(bundle.file(file), appRequired: true);
+      case WriteBootloaderStep(:final file):
+        device.validateBootloader(bundle.file(file));
+      case WritePartitionStep(:final partition, :final file):
+        final data = bundle.file(file);
+        final p = table?.findByName(partition);
+        // An erased slot (as a dump saves an unused OTA partition) has no app to check.
+        if (p != null && p.isApp && data.any((b) => b != 0xFF)) device.validateImageChip(data, appRequired: true);
+        if (p?.isPrimaryBootloader ?? partition == 'bootloader') device.validateBootloader(data);
+      default:
+    }
   }
   for (var i = 0; i < bundle.steps.length; i++) {
     final step = bundle.steps[i];

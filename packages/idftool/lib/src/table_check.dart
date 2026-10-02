@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 
+import 'bundle.dart';
 import 'device.dart';
 import 'int_literal.dart';
 import 'manifest.dart';
@@ -107,8 +108,9 @@ List<PartitionDifference> comparePartitionTables(PartitionTable expected, Partit
     ];
 
 /// What flashing a bundle will meet on a device, worked out before anything
-/// is written: whether its table matches, and whether every partition it
-/// names exists in the table that name will resolve against.
+/// is written: whether its table matches, whether every partition it names
+/// exists in the table that name will resolve against, and whether a named
+/// write or erase collides with a role file.
 class BundleCheck {
   const BundleCheck({
     required this.deviceTable,
@@ -118,6 +120,7 @@ class BundleCheck {
     this.differences = const [],
     this.used = const {},
     this.missing = const {},
+    this.conflicts = const [],
   });
 
   /// The device's table; `null` when it has none that can be read.
@@ -138,6 +141,10 @@ class BundleCheck {
   /// Problems by step index: a partition a step names that the table it
   /// resolves against does not have.
   final Map<int, String> missing;
+
+  /// Named writes or erases of a partition a role file also picks (see
+  /// [bundleConflicts]).
+  final List<String> conflicts;
 
   bool get carriesTable => table != null;
   bool get tableMatches => table != null && differences.isEmpty;
@@ -176,6 +183,7 @@ class BundleCheck {
               : "This device's partition layout is different from the one this update requires";
     }
     if (missing.isNotEmpty) return missing.values.join('; ');
+    if (conflicts.isNotEmpty) return conflicts.join('; ');
     return null;
   }
 }
@@ -248,6 +256,17 @@ BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable) {
     differences: table == null ? const [] : comparePartitionTables(table, deviceTable),
     used: used,
     missing: missing,
+    conflicts: current == null
+        ? const []
+        : bundleConflicts(
+            table: current,
+            namedPartitions: [
+              for (final step in bundle.steps)
+                if (step case WritePartitionStep(:final partition) || EraseStep(:final partition)) partition,
+            ],
+            hasFactory: bundle.contents.factoryApp != null,
+            hasOta: bundle.contents.otaApp != null,
+          ),
   );
 }
 

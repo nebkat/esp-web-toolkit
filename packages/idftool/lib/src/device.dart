@@ -260,15 +260,29 @@ class IdfDevice {
       throw IdfToolException(
           "Application binary size ${hex(app.length)} exceeds partition '${partition.name}' size ${hex(partition.size)}");
     }
+    return validateImageChip(app, appRequired: true);
+  }
+
+  /// Parse [bootloader] as an ESP image and check it targets this chip: a
+  /// bootloader for another chip leaves the board unable to boot.
+  ImageMetadata validateBootloader(Uint8List bootloader) {
+    if (bootloader.isEmpty) throw IdfToolException('Bootloader binary is empty');
+    return validateImageChip(bootloader, appRequired: false);
+  }
+
+  /// Parse [data] as an ESP image (with an app descriptor when [appRequired])
+  /// and check it was built for this chip.
+  ImageMetadata validateImageChip(Uint8List data, {required bool appRequired}) {
+    final what = appRequired ? 'application' : 'bootloader';
     final ImageMetadata image;
     try {
-      image = ImageMetadata.fromBytes(app, appRequired: true);
+      image = ImageMetadata.fromBytes(data, appRequired: appRequired);
     } catch (e) {
-      throw IdfToolException('Invalid application binary: $e');
+      throw IdfToolException('Invalid $what binary: $e');
     }
     final imageChip = image.header.chipId;
     if (imageChip?.value != chip.imageChipId) {
-      throw IdfToolException('Chip ID mismatch: attempting to flash ${imageChip?.name ?? 'unknown-chip'} image '
+      throw IdfToolException('Chip ID mismatch: attempting to flash ${imageChip?.name ?? 'unknown-chip'} $what image '
           'to ${chip.name} device');
     }
     return image;

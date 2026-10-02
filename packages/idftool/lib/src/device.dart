@@ -414,11 +414,15 @@ class IdfDevice {
   }
 
   /// Read every partition into a ZIP (`<name>.bin` each, plus
-  /// `partition_table.csv`) — python idftool's bundle format.
+  /// `partition_table.csv`) — python idftool's bundle format — with the
+  /// bootloader as `bootloader.bin` when its offset is known, so the dump
+  /// restores the whole device.
   Future<Uint8List> dumpBundle({ProgressCallback? onProgress}) async {
     final table = await partitionTable();
+    final bootloader = (await resolver()).bootloaderEntry;
     final archive = Archive();
-    for (final partition in table) {
+    // A table with its own `bootloader` row dumps it as a partition already.
+    for (final partition in [if (bootloader != null && !table.any((p) => p.isPrimaryBootloader)) bootloader, ...table]) {
       final data = await loader.readFlash(partition.offset, partition.size,
           onProgress: (done, total) => onProgress?.call('Reading ${partition.name}', done, total));
       archive.add(ArchiveFile.bytes('${partition.name}.bin', data));
@@ -457,7 +461,9 @@ class IdfDevice {
         throw IdfToolException('Bundle entry ${file.name} size ${hex(data.length)} exceeds partition '
             '${partition.name} size ${hex(partition.size)}');
       }
-      if (partition.isApp) validateApp(data, partition);
+      // An erased slot (as dump-bundle saves an unused OTA partition) has no app to check.
+      if (partition.isApp && data.any((b) => b != 0xFF)) validateApp(data, partition);
+      if (partition.isPrimaryBootloader) validateBootloader(data);
       writes.add((partition, partition.offset, data));
     }
     if (csv != null) {

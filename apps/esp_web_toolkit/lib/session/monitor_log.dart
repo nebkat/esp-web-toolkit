@@ -41,6 +41,31 @@ class MonitorLog extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// How the view shows the device's timestamps (and the host's).
+  TimeDisplay get timeDisplay => _timeDisplay;
+  TimeDisplay _timeDisplay = TimeDisplay.readable;
+  set timeDisplay(TimeDisplay value) {
+    _timeDisplay = value;
+    notifyListeners();
+  }
+
+  /// Whether the view shows, after each timestamp, the time since the
+  /// previous line's.
+  bool get showDelta => _showDelta;
+  bool _showDelta = false;
+  set showDelta(bool value) {
+    _showDelta = value;
+    notifyListeners();
+  }
+
+  /// Whether the view shows when each line arrived.
+  bool get hostTime => _hostTime;
+  bool _hostTime = false;
+  set hostTime(bool value) {
+    _hostTime = value;
+    notifyListeners();
+  }
+
   void _schedule() => _notify ??= Timer(const Duration(milliseconds: 50), () {
         _notify = null;
         notifyListeners();

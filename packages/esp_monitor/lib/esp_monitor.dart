@@ -8,3 +8,4 @@ export 'src/buffer.dart';
 export 'src/filter.dart';
 export 'src/line.dart';
 export 'src/splitter.dart';
+export 'src/timestamp.dart';

@@ -78,6 +78,11 @@ void main() {
       expect(parse('I (29) boot: ESP-IDF v5.4 2nd stage bootloader').tag, 'boot');
     });
 
+    test('a tag padded to a width', () {
+      final line = parse('W (5) app  : started');
+      expect((line.level, line.tag, line.message), (LogLevel.warning, 'app', 'started'));
+    });
+
     test('ordinary text is not mistaken for a log line', () {
       expect(parse('I think so: yes').kind, LineKind.text);
       expect(parse('Hello world').kind, LineKind.text);
@@ -125,7 +130,7 @@ void main() {
       final b = filled();
       b.filter = const MonitorFilter(maxLevel: LogLevel.warning);
       expect(b.visible.map((l) => l.text), [startsWith('rst:'), 'E (20) wifi: failed', 'printf output', 'W (40) nvs: low space']);
-      b.filter = const MonitorFilter(hiddenTags: {'wifi'}, logOnly: true);
+      b.filter = const MonitorFilter(tags: {'wifi'}, logOnly: true);
       expect(b.visible.map((l) => l.tag), ['boot', 'nvs']);
       b.filter = const MonitorFilter(query: 'WIFI');
       expect(b.visible, hasLength(2));
@@ -141,6 +146,17 @@ void main() {
       expect((note.kind, note.level, b.lines.last), (LineKind.note, null, note));
       b.filter = const MonitorFilter(logOnly: true);
       expect(b.visible, isNot(contains(note)));
+    });
+
+    test('showing only some tags, and toggling one', () {
+      final b = filled();
+      b.filter = MonitorFilter.none.onlyTag('wifi');
+      expect(b.visible.where((l) => l.kind == LineKind.log).map((l) => l.tag), ['wifi', 'wifi']);
+      b.filter = b.filter.withTag('nvs', shown: true);
+      expect(b.visible.where((l) => l.kind == LineKind.log).map((l) => l.tag), ['wifi', 'wifi', 'nvs']);
+      b.filter = b.filter.allTags().withTag('wifi', shown: false);
+      expect((b.filter.showsTag('wifi'), b.filter.showsTag('boot')), (false, true));
+      expect(b.filter.allTags().isEmpty, isTrue);
     });
 
     test('an invalid regex leaves the filter alone', () {
@@ -166,6 +182,51 @@ void main() {
       expect(b.visible, b.lines);
       expect(b.tags.values.fold(0, (a, n) => a + n), b.lines.length);
       expect(b.received, 25);
+    });
+  });
+
+  group('timestamps', () {
+    test('the ESP-IDF forms', () {
+      final uptime = LogTimestamp.tryParse('1234')!;
+      expect((uptime.kind, uptime.millis), (TimestampKind.uptime, 1234));
+      final unix = LogTimestamp.tryParse('1759672800123')!;
+      expect((unix.kind, unix.dateTime!.toUtc()), (TimestampKind.dateTime, DateTime.utc(2025, 10, 5, 14, 0, 0, 123)));
+      final day = LogTimestamp.tryParse('01:02:03.004')!;
+      expect((day.kind, day.millis), (TimestampKind.timeOfDay, 3723004));
+      expect(LogTimestamp.tryParse('26-10-05 14:03:12.345')!.dateTime, DateTime(2026, 10, 5, 14, 3, 12, 345));
+      expect(LogTimestamp.tryParse('126-10-05 14:03:12.345')!.dateTime, DateTime(2026, 10, 5, 14, 3, 12, 345));
+      expect(LogTimestamp.tryParse('soon'), isNull);
+    });
+
+    test('display', () {
+      final uptime = LogTimestamp.tryParse('3723004')!;
+      expect(TimeDisplay.raw.format(uptime), '3723004');
+      expect(TimeDisplay.readable.format(uptime), 'boot+1h 02m 03.004s');
+      expect(TimeDisplay.clock.format(uptime), 'boot+1h 02m 03.004s');
+      expect(TimeDisplay.clock.format(uptime, estimate: DateTime(2026, 1, 1, 9, 30)), '~09:30:00.000');
+      expect(formatDelta(uptime, LogTimestamp.tryParse('3722992')), '+0.012s');
+      expect(formatDelta(LogTimestamp.tryParse('5')!, uptime), isNull);
+      expect(formatDelta(uptime, LogTimestamp.tryParse('01:00:00.000')), isNull);
+      expect(formatDelta(LogTimestamp.tryParse('00:00:01.000')!, LogTimestamp.tryParse('23:59:59.500')), '+1.500s');
+      final date = LogTimestamp.tryParse('26-10-05 14:03:12.345')!;
+      expect(TimeDisplay.readable.format(date), '2026-10-05 14:03:12.345');
+      expect(TimeDisplay.clock.format(date), '14:03:12.345');
+      expect(formatDuration(const Duration(minutes: 2, milliseconds: 3456)), '2m 03.456s');
+    });
+
+    test('a boot clock places uptimes on the host clock, per boot', () {
+      final b = MonitorBuffer();
+      final t0 = DateTime(2026, 10, 5, 12);
+      b.add(utf8.encode('I (100) a: one\n'), now: t0.add(const Duration(milliseconds: 150)));
+      b.add(utf8.encode('I (200) a: two\n'), now: t0.add(const Duration(milliseconds: 210)));
+      expect(b.lines.first.boot!.at, t0.add(const Duration(milliseconds: 10)));
+      expect(b.lines.first.deviceAt, t0.add(const Duration(milliseconds: 110)));
+      b.add(utf8.encode('rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)\nI (50) a: three\n'), now: t0.add(const Duration(seconds: 5)));
+      expect(b.lines.last.boot, isNot(same(b.lines.first.boot)));
+      expect(b.lines.last.deviceAt, t0.add(const Duration(seconds: 5)));
+      // No banner, but the uptime went backwards: a new boot all the same.
+      b.add(utf8.encode('I (10) a: four\n'), now: t0.add(const Duration(seconds: 9)));
+      expect(b.lines.last.boot, isNot(same(b.lines[2].boot)));
     });
   });
 }

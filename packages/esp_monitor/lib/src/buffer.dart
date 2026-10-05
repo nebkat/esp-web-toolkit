@@ -5,6 +5,7 @@ import 'ansi.dart';
 import 'filter.dart';
 import 'line.dart';
 import 'splitter.dart';
+import 'timestamp.dart';
 
 /// Bytes in, lines out: splits, decodes and parses what the device sends,
 /// keeps the last [capacity] lines, and maintains the lines that pass
@@ -20,6 +21,7 @@ class MonitorBuffer {
   final List<MonitorLine> _visible = [];
   final Map<String, int> _tags = {};
   var _seq = 0;
+  var _boot = BootClock();
   var _filter = MonitorFilter.none;
   var _matches = MonitorFilter.none.matcher();
 
@@ -87,9 +89,21 @@ class MonitorBuffer {
     _visible.clear();
     _tags.clear();
     _ansi.reset();
+    _boot = BootClock();
   }
 
   void _append(MonitorLine line) {
+    if (line.kind != LineKind.note) {
+      // A reset banner starts a boot; so does an uptime going backwards, for
+      // a reboot without one (a console on USB, which the ROM doesn't use).
+      final time = line.time;
+      if (line.kind == LineKind.reset && _boot.lastUptime >= 0) _boot = BootClock();
+      if (time != null && time.kind == TimestampKind.uptime) {
+        if (time.millis < _boot.lastUptime) _boot = BootClock();
+        _boot.observe(line.received, time.millis);
+      }
+      line.boot = _boot;
+    }
     _lines.add(line);
     final tag = line.tag;
     if (tag != null) _tags[tag] = (_tags[tag] ?? 0) + 1;

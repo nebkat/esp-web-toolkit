@@ -2,6 +2,7 @@
 library;
 
 import 'ansi.dart';
+import 'timestamp.dart';
 
 /// ESP-IDF log levels, most severe first.
 enum LogLevel {
@@ -87,14 +88,33 @@ class MonitorLine {
   /// `YY-MM-DD HH:MM:SS.sss` or Unix milliseconds. `null` when the firmware
   /// logs without timestamps.
   final String? timestamp;
+
+  /// Where [timestamp] starts in [text].
+  static const timestampStart = 3;
+
+  /// [timestamp], interpreted.
+  late final LogTimestamp? time = LogTimestamp.tryParse(timestamp);
+
+  /// The boot the line belongs to, set by [MonitorBuffer]; `null` for notes
+  /// and lines parsed on their own.
+  BootClock? boot;
+
+  /// The host time the device's timestamp stands for: the timestamp itself
+  /// when it is a date, or an uptime placed on the boot's [BootClock].
+  DateTime? get deviceAt {
+    final time = this.time;
+    if (time == null) return null;
+    return time.dateTime ?? (time.kind == TimestampKind.uptime ? boot?.atUptime(time.millis) : null);
+  }
+
   final String? tag;
   final String? message;
 
   // `L (timestamp) tag: message`. With Log v2 the timestamp and the tag are each optional, so
   // `L tag: message` and `L (timestamp) message` occur too. A tag is taken to run to the first
   // ": " and have no spaces when there is no timestamp, so ordinary text starting with a capital
-  // E/W/I/D/V and a space isn't mistaken for a log line.
-  static final _withTimestamp = RegExp(r'^([EWIDV]) \((\d+|\d{2}:\d{2}:\d{2}\.\d{3}|\d{2}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\) (?:(.*?): )?(.*)$');
+  // E/W/I/D/V and a space isn't mistaken for a log line. A tag padded to a width is trimmed.
+  static final _withTimestamp = RegExp(r'^([EWIDV]) \((\d+|\d{2}:\d{2}:\d{2}\.\d{3}|\d{2,4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\) (?:(.*?)\s*: )?(.*)$');
   static final _withoutTimestamp = RegExp(r'^([EWIDV]) ([^\s:()]+): (.*)$');
 
   static (LogLevel, String?, String?, String)? _parseLog(String text) {

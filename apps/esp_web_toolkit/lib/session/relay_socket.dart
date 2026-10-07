@@ -29,7 +29,8 @@ Uri? parseRelayUrl(String text) {
 /// A shared device's address from what the user pasted: the link a relay
 /// page hands out (`…/#/flash?remote=<address>`, or `…/flash?remote=…`
 /// from before routes moved into the fragment) or the address itself
-/// (`wss://<relay>/c/<id>`). `null` if it is neither.
+/// (`wss://<relay>/c/<id>`). `null` if it is neither. Any WebSocket address
+/// is taken; what a session's address looks like is for the relay to say.
 Uri? parseRemoteAddress(String text) {
   String? fromLink;
   try {
@@ -39,9 +40,7 @@ Uri? parseRemoteAddress(String text) {
   } on FormatException {
     // Not a link with a query; try it as the address itself.
   }
-  final url = parseRelayUrl(fromLink ?? text);
-  if (url == null || !RegExp(r'/c/[A-Za-z0-9_-]{16,}$').hasMatch(url.path)) return null;
-  return url;
+  return parseRelayUrl(fromLink ?? text);
 }
 
 /// A WebSocket to the relay server (`apps/relay`): binary frames are the

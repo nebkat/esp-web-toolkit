@@ -28,7 +28,7 @@ class _RemoteDialogState extends State<_RemoteDialog> {
   void _submit() {
     final url = parseRemoteAddress(_controller.text);
     if (url == null) {
-      setState(() => _problem = 'Paste the link from the sharing page, or a wss://…/c/<id> address');
+      setState(() => _problem = 'Paste the link from the sharing page, or a wss:// address');
       return;
     }
     if (url.scheme == 'ws' && Uri.base.scheme == 'https') {

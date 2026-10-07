@@ -2,6 +2,10 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
+## 0.6.1 — 2026-10-07
+
+- Remote devices: any `wss://` address is accepted, including named sessions (a device's serial) with a `?grant=`.
+
 ## 0.6.0 — 2026-10-05
 
 - Monitor: timestamps as printed, readable (`boot+1m 02.345s`, full dates) or in local time (estimated for time since boot); hover one to see it as printed. Optional time since the previous line, and host arrival time.

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:idftool/idftool.dart';
+import 'package:web/web.dart' as web;
 
 import '../session/device_session.dart';
 import '../session/flash_plan.dart';
@@ -15,8 +16,11 @@ import '../widgets/port_picker.dart';
 /// The bundle's name and description are the
 /// page's only heading. None of the tool's machinery is shown; the log
 /// stays behind a disclosure.
+///
+/// A bundle loaded from a URL can be shared as a link or as an `<iframe>`
+/// for another site; `&iframe` on the link is that [embedded] flasher.
 class OneClickPage extends StatefulWidget {
-  const OneClickPage({super.key, required this.session, this.bundleUrl, this.bundle, this.onBack});
+  const OneClickPage({super.key, required this.session, this.bundleUrl, this.bundle, this.onBack, this.embedded = false});
   final DeviceSession session;
 
   /// The bundle to fetch on arrival, from the link's `?bundle=`.
@@ -27,6 +31,10 @@ class OneClickPage extends StatefulWidget {
 
   /// Shown as a way back when this page was pushed over the full tool.
   final VoidCallback? onBack;
+
+  /// In another site's iframe (`&iframe`): tighter, the bundle can't be
+  /// closed, the log is collapsed, and the toolkit is a link away.
+  final bool embedded;
 
   @override
   State<OneClickPage> createState() => _OneClickPageState();
@@ -40,6 +48,9 @@ class _OneClickPageState extends State<OneClickPage> {
   _Phase _phase = _Phase.empty;
   FlashBundle? _bundle;
   String? _problem;
+
+  /// Where [_bundle] was fetched from, for sharing it; null for a file.
+  Uri? _bundleUrl;
 
   late final _url = TextEditingController(text: widget.bundleUrl?.toString() ?? '');
   bool _fetching = false;
@@ -84,7 +95,7 @@ class _OneClickPageState extends State<OneClickPage> {
     if (text.isEmpty) return setState(() => _urlProblem = 'Enter the URL of a bundle');
     final url = Uri.tryParse(text);
     if (url == null || !url.hasScheme || !url.hasAuthority) return setState(() => _urlProblem = 'Enter a full URL, starting with https://');
-    SystemNavigator.routeInformationUpdated(uri: Uri(path: '/oneclick', queryParameters: {'bundle': text}));
+    SystemNavigator.routeInformationUpdated(uri: Uri.parse(_route(url, embedded: widget.embedded)));
     _fetch(url);
   }
 
@@ -99,7 +110,7 @@ class _OneClickPageState extends State<OneClickPage> {
       // same-site hosts (Cloudflare Access) as usual.
       final response = await http.get(url);
       if (response.statusCode != 200) throw IdfToolException('HTTP ${response.statusCode}');
-      _use(response.bodyBytes, url.pathSegments.lastOrNull ?? 'bundle', fromUrl: true);
+      _use(response.bodyBytes, url.pathSegments.lastOrNull ?? 'bundle', url: url);
     } catch (e) {
       if (mounted) setState(() => _urlProblem = 'Could not load bundle: ${e is IdfToolException ? e.message : e}');
     } finally {
@@ -110,14 +121,15 @@ class _OneClickPageState extends State<OneClickPage> {
   Future<void> _pick() async {
     final file = await pickFile(extensions: ['zip']);
     if (file == null) return;
-    _use(file.bytes, file.name, fromUrl: false);
+    _use(file.bytes, file.name);
   }
 
-  void _use(Uint8List bytes, String name, {required bool fromUrl}) {
+  void _use(Uint8List bytes, String name, {Uri? url}) {
     try {
       final bundle = FlashBundle.fromZip(bytes, source: name);
       setState(() {
         _bundle = bundle;
+        _bundleUrl = url;
         _phase = _Phase.ready;
         _problem = null;
         _urlProblem = null;
@@ -128,19 +140,40 @@ class _OneClickPageState extends State<OneClickPage> {
       });
     } catch (e) {
       final problem = '$name is not a usable bundle: ${e is IdfToolException ? e.message : e}';
-      setState(() => fromUrl ? _urlProblem = problem : _fileProblem = problem);
+      setState(() => url != null ? _urlProblem = problem : _fileProblem = problem);
     }
   }
 
   /// Drop the bundle and go back to the opener.
   void _close() => setState(() {
         _bundle = null;
+        _bundleUrl = null;
         _phase = _Phase.empty;
         _problem = null;
         _completed.clear();
         _currentStep = -1;
         _forgetCheck();
       });
+
+  /// The fragment route for [bundle]: `/oneclick?bundle=…`, then `&iframe`
+  /// for the embedded flasher.
+  static String _route(Uri bundle, {required bool embedded}) => '${Uri(path: '/oneclick', queryParameters: {'bundle': '$bundle'})}${embedded ? '&iframe' : ''}';
+
+  /// This version of the toolkit, opened at [_route].
+  static String _link(Uri bundle, {bool embedded = false}) => '${Uri.base.origin}${Uri.base.path}#${_route(bundle, embedded: embedded)}';
+
+  /// The `<iframe>` for another site. Web Serial in a frame needs the
+  /// embedding page to allow it (`allow="serial"`).
+  static String _embedCode(Uri bundle, String name) {
+    String attr(String v) => v.replaceAll('&', '&amp;').replaceAll('"', '&quot;');
+    return '<iframe src="${attr(_link(bundle, embedded: true))}" title="${attr(name)}" '
+        'width="100%" height="480" style="border:0;max-width:640px" allow="serial"></iframe>';
+  }
+
+  void _copy(String text, String what) {
+    Clipboard.setData(ClipboardData(text: text));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$what copied')));
+  }
 
   void _forgetCheck() {
     _check = null;
@@ -211,6 +244,7 @@ class _OneClickPageState extends State<OneClickPage> {
       _checkStarted = true;
       Future<void>.microtask(_checkDevice);
     }
+    if (widget.embedded) return Scaffold(body: _embedded(theme, bundle));
     return Scaffold(
       body: Center(
         child: ConstrainedBox(
@@ -237,6 +271,39 @@ class _OneClickPageState extends State<OneClickPage> {
       ),
     );
   }
+
+  /// The page in another site's iframe, whose height that site fixes: a
+  /// little smaller, centred, and never scrolling as a whole — the steps
+  /// give up their room first and scroll, the log is collapsed.
+  Widget _embedded(ThemeData theme, FlashBundle? bundle) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(textScaler: const TextScaler.linear(0.9)),
+        child: Theme(
+          data: theme.copyWith(visualDensity: VisualDensity.compact),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+                  Flexible(
+                    child: switch (_phase) {
+                      _Phase.empty => SingleChildScrollView(child: _opener(theme)),
+                      _ => _bundleCard(bundle!, theme),
+                    },
+                  ),
+                  if (_logShown)
+                    ExpansionTile(
+                      title: const Text('Log'),
+                      dense: true,
+                      tilePadding: const EdgeInsets.symmetric(horizontal: 8),
+                      children: [_log(theme, height: 120)],
+                    ),
+                ]),
+              ),
+            ),
+          ),
+        ),
+      );
 
   /// Two ways in: a bundle at a URL (the row a `?bundle=` link lands on,
   /// loading or failing in place) or a bundle file.
@@ -281,11 +348,12 @@ class _OneClickPageState extends State<OneClickPage> {
         const SizedBox(height: 20),
         Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
           FilledButton.tonalIcon(onPressed: _fetching ? null : _pick, icon: const Icon(Icons.folder_open), label: const Text('Open a bundle file…')),
-          FilledButton.tonalIcon(
-            onPressed: _fetching ? null : () => Navigator.pushReplacementNamed(context, '/flash'),
-            icon: const Icon(Icons.add_box_outlined),
-            label: const Text('Create a bundle…'),
-          ),
+          if (!widget.embedded)
+            FilledButton.tonalIcon(
+              onPressed: _fetching ? null : () => Navigator.pushReplacementNamed(context, '/flash'),
+              icon: const Icon(Icons.add_box_outlined),
+              label: const Text('Create a bundle…'),
+            ),
         ]),
         if (_fileProblem != null) ...[
           const SizedBox(height: 8),
@@ -297,13 +365,65 @@ class _OneClickPageState extends State<OneClickPage> {
 
   Widget _bundleCard(FlashBundle bundle, ThemeData theme) {
     final flashing = _phase == _Phase.flashing;
+    final url = _bundleUrl;
+    final steps = [
+      for (var i = 0; i < bundle.steps.length; i++)
+        if (_row(bundle, bundle.steps[i]) case final row) ...[
+          OpTile(
+            icon: row.icon,
+            name: row.name,
+            detail: row.detail,
+            summary: row.summary,
+            warning: _check?.missing[i] ?? (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false) ? _check!.blocker : null),
+            leading: SizedBox(
+              width: 24,
+              child: Center(
+                child: _completed.contains(i)
+                    ? const Icon(Icons.check_circle, size: 18, color: Colors.green)
+                    : i == _currentStep && flashing
+                        ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                        : _phase == _Phase.failed && i == _currentStep
+                            ? Icon(Icons.error, size: 18, color: theme.colorScheme.error)
+                            : Text('${i + 1}.', style: theme.textTheme.bodyMedium),
+              ),
+            ),
+          ),
+          if (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false)) _tableChanges(_check!, theme, enabled: _phase == _Phase.ready),
+        ],
+    ];
     return Card(
       child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        padding: EdgeInsets.all(widget.embedded ? 16 : 20),
+        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
           Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Expanded(child: Text(bundle.name, style: theme.textTheme.titleLarge)),
-            if (widget.bundle == null)
+            Expanded(child: Text(bundle.name, style: widget.embedded ? theme.textTheme.titleMedium : theme.textTheme.titleLarge)),
+            if (url != null && widget.embedded)
+              IconButton(
+                tooltip: 'Open in ESP Web Toolkit',
+                icon: const Icon(Icons.open_in_new),
+                onPressed: () => web.window.open(_link(url), '_blank'),
+              )
+            else if (url != null)
+              PopupMenuButton<void>(
+                tooltip: 'Share',
+                icon: const Icon(Icons.share),
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    onTap: () => _copy(_link(url), 'Link'),
+                    child: const ListTile(leading: Icon(Icons.link), title: Text('Copy link'), contentPadding: EdgeInsets.zero),
+                  ),
+                  PopupMenuItem(
+                    onTap: () => _copy(_embedCode(url, bundle.name), 'Embed code'),
+                    child: const ListTile(
+                      leading: Icon(Icons.code),
+                      title: Text('Copy embed code'),
+                      subtitle: Text('An <iframe> to put this flasher on another site'),
+                      contentPadding: EdgeInsets.zero,
+                    ),
+                  ),
+                ],
+              ),
+            if (widget.bundle == null && !widget.embedded)
               IconButton(
                 tooltip: 'Close this bundle',
                 icon: const Icon(Icons.close),
@@ -314,30 +434,11 @@ class _OneClickPageState extends State<OneClickPage> {
           if (bundle.chip != null) Padding(padding: const EdgeInsets.only(top: 4), child: Text('For ${bundle.chip!.name}', style: theme.textTheme.bodySmall)),
           const SizedBox(height: 16),
           Text('This update will:', style: theme.textTheme.labelLarge),
-          for (var i = 0; i < bundle.steps.length; i++)
-            if (_row(bundle, bundle.steps[i]) case final row) ...[
-              OpTile(
-                icon: row.icon,
-                name: row.name,
-                detail: row.detail,
-                summary: row.summary,
-                warning: _check?.missing[i] ?? (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false) ? _check!.blocker : null),
-                leading: SizedBox(
-                  width: 24,
-                  child: Center(
-                    child: _completed.contains(i)
-                        ? const Icon(Icons.check_circle, size: 18, color: Colors.green)
-                        : i == _currentStep && flashing
-                            ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                            : _phase == _Phase.failed && i == _currentStep
-                                ? Icon(Icons.error, size: 18, color: theme.colorScheme.error)
-                                : Text('${i + 1}.', style: theme.textTheme.bodyMedium),
-                  ),
-                ),
-              ),
-              if (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false)) _tableChanges(_check!, theme, enabled: _phase == _Phase.ready),
-            ],
-          const SizedBox(height: 20),
+          if (widget.embedded)
+            Flexible(child: Scrollbar(child: ListView(shrinkWrap: true, children: steps)))
+          else
+            ...steps,
+          SizedBox(height: widget.embedded ? 12 : 20),
           switch (_phase) {
             _Phase.done => Row(children: [
                 const Icon(Icons.check_circle, color: Colors.green),
@@ -580,8 +681,8 @@ class _OneClickPageState extends State<OneClickPage> {
     ]);
   }
 
-  Widget _log(ThemeData theme) => Container(
-        height: 220,
+  Widget _log(ThemeData theme, {double height = 220}) => Container(
+        height: height,
         padding: const EdgeInsets.all(8),
         decoration: BoxDecoration(border: Border.all(color: theme.dividerColor), borderRadius: BorderRadius.circular(8)),
         child: SelectionArea(

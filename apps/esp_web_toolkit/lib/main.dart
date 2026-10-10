@@ -29,7 +29,8 @@ class IdfToolApp extends StatelessWidget {
   const IdfToolApp({super.key});
 
   /// The one-click flasher's route. `#/oneclick?bundle=<url>` is the link to
-  /// hand out, with the bundle's absolute URL.
+  /// hand out, with the bundle's absolute URL; `&iframe` makes it the
+  /// compact flasher for embedding in another site.
   static const oneClickPath = '/oneclick';
 
   /// The page that shares a device through a relay; it hands out links to
@@ -53,7 +54,7 @@ class IdfToolApp extends StatelessWidget {
     if (path == relayPath) return RelayShell(relayUrl: switch (params['relay']) { final r? => parseRelayUrl(r), null => null });
     if (path == oneClickPath) {
       final bundle = params['bundle'];
-      return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle));
+      return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle), embedded: params.containsKey('iframe'));
     }
     return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions, remoteUrl: remote);
   }
@@ -220,8 +221,9 @@ class _HomeShellState extends State<HomeShell> {
 
 /// Owns a session for the one-click page, which has no rail, bar or log.
 class OneClickShell extends StatefulWidget {
-  const OneClickShell({super.key, this.bundleUrl});
+  const OneClickShell({super.key, this.bundleUrl, this.embedded = false});
   final Uri? bundleUrl;
+  final bool embedded;
 
   @override
   State<OneClickShell> createState() => _OneClickShellState();
@@ -237,7 +239,7 @@ class _OneClickShellState extends State<OneClickShell> {
   }
 
   @override
-  Widget build(BuildContext context) => ListenableBuilder(listenable: _session, builder: (context, _) => OneClickPage(session: _session, bundleUrl: widget.bundleUrl));
+  Widget build(BuildContext context) => ListenableBuilder(listenable: _session, builder: (context, _) => OneClickPage(session: _session, bundleUrl: widget.bundleUrl, embedded: widget.embedded));
 }
 
 /// The whole page when the browser has no Web Serial: nothing here can work

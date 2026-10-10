@@ -2,6 +2,10 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
+## 0.6.2 — 2026-10-10
+
+- One-click flasher: a share menu copies the bundle's link or an `<iframe>` embed code; `&iframe` on a link is a compact flasher for other sites (the frame needs `allow="serial"`).
+
 ## 0.6.1 — 2026-10-07
 
 - Remote devices: any `wss://` address is accepted, including named sessions (a device's serial) with a `?grant=`.

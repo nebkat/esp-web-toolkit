@@ -2,6 +2,10 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
+## 0.6.3 — 2026-10-13
+
+- Leaving a page stops the reads it started: an eFuse read, a partition or full-flash dump, or a data partition read no longer keeps the device busy after you move on.
+
 ## 0.6.2 — 2026-10-10
 
 - One-click flasher: a share menu copies the bundle's link or an `<iframe>` embed code; `&iframe` on a link is a compact flasher for other sites (the frame needs `allow="serial"`).

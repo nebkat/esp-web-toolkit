@@ -92,6 +92,7 @@ class _DataPageState extends State<DataPage> {
   @override
   void dispose() {
     session.removeListener(_onSessionChanged);
+    session.cancelOperation(this);
     super.dispose();
   }
 
@@ -117,7 +118,7 @@ class _DataPageState extends State<DataPage> {
   }
 
   Future<void> _listPartitions() async {
-    final partitions = await session.runDevice('List data partitions', (device) async => (await device.partitionTable()).where(_isData).toList());
+    final partitions = await session.runDevice('List data partitions', owner: this, (device) async => (await device.partitionTable()).where(_isData).toList());
     if (partitions == null || !mounted) return;
     setState(() => _partitions = partitions);
     if (partitions.isEmpty) session.addLog('No NVS or filesystem partition in the partition table', error: true);
@@ -136,7 +137,7 @@ class _DataPageState extends State<DataPage> {
       _source = null;
       _content = null;
     });
-    await session.runDevice('Read ${partition.name}', (device) async {
+    await session.runDevice('Read ${partition.name}', owner: this, (device) async {
       final _Content content;
       if (_isNvs(partition)) {
         final (partition: _, image: raw) = await device.readNvs(name: partition.name, onProgress: session.reportProgress);

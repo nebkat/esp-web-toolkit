@@ -147,6 +147,9 @@ class DeviceSession extends ChangeNotifier {
   Progress? progress;
   String? currentOperation;
 
+  /// Who started [currentOperation], when [cancelOperation] may stop it.
+  Object? _owner;
+
   final List<LogLine> log = [];
 
   /// What each granted port turned out to be, learned by connecting to it or
@@ -705,11 +708,15 @@ class DeviceSession extends ChangeNotifier {
   }
 
   /// Run [op] against the connected loader as the one active operation,
-  /// logging failures. Returns `null` if it failed or nothing is connected.
-  Future<T?> run<T>(String label, Future<T> Function(EspLoader loader) op) => runDevice(label, (device) => op(device.loader));
+  /// logging failures. Returns `null` if it failed, was cancelled or nothing
+  /// is connected. An operation that only reads — so stopping it part way
+  /// leaves nothing half done — names its [owner], which can then stop it
+  /// with [cancelOperation].
+  Future<T?> run<T>(String label, Future<T> Function(EspLoader loader) op, {Object? owner}) =>
+      runDevice(label, (device) => op(device.loader), owner: owner);
 
   /// [run], handing the operation the [IdfDevice].
-  Future<T?> runDevice<T>(String label, Future<T> Function(IdfDevice device) op) async {
+  Future<T?> runDevice<T>(String label, Future<T> Function(IdfDevice device) op, {Object? owner}) async {
     final device = _device;
     if (device == null || state != SessionState.connected) {
       addLog('Not connected', error: true);
@@ -717,6 +724,8 @@ class DeviceSession extends ChangeNotifier {
     }
     state = SessionState.busy;
     currentOperation = label;
+    _owner = owner;
+    device.loader.cancelRequested = false;
     progress = null;
     notifyListeners();
     final stopwatch = Stopwatch()..start();
@@ -724,6 +733,9 @@ class DeviceSession extends ChangeNotifier {
       final result = await op(device);
       addLog('$label: done in ${_seconds(stopwatch.elapsed)}');
       return result;
+    } on EspCancelledException {
+      addLog('$label: cancelled');
+      return null;
     } catch (e) {
       addLog('$label failed: $e', error: true);
       // Only a port that has actually gone away means the connection is
@@ -732,10 +744,18 @@ class DeviceSession extends ChangeNotifier {
       return null;
     } finally {
       if (state == SessionState.busy) state = SessionState.connected;
+      device.loader.cancelRequested = false;
       currentOperation = null;
+      _owner = null;
       progress = null;
       notifyListeners();
     }
+  }
+
+  /// Stop the running operation at its next command if [owner] started it
+  /// (see [run]): a page calls this when it is left.
+  void cancelOperation(Object owner) {
+    if (state == SessionState.busy && identical(_owner, owner)) _loader?.cancelRequested = true;
   }
 
   /// Read the partition table, OTA selection and app descriptors into [plan].
@@ -768,16 +788,21 @@ class DeviceSession extends ChangeNotifier {
     unawaited(readLayout());
   }
 
-  /// Read every eFuse block into [efuses].
-  Future<void> readEfuses() => run('Read eFuses', (loader) async {
-        efuses = await loader.readEfuses(onProgress: (done, total) => reportProgress('Reading eFuses', done, total));
+  /// Read every eFuse block into [efuses], on behalf of [owner] (see [run]).
+  Future<void> readEfuses({Object? owner}) => run('Read eFuses', owner: owner, (loader) async {
+        try {
+          efuses = await loader.readEfuses(onProgress: (done, total) => reportProgress('Reading eFuses', done, total));
+        } on EspCancelledException {
+          _efusesAttempted = false; // read them when the page is next opened
+          rethrow;
+        }
       });
 
   /// [readEfuses] once per connection, as [ensureLayout].
-  void ensureEfuses() {
+  void ensureEfuses({Object? owner}) {
     if (!connected || busy || _efusesAttempted) return;
     _efusesAttempted = true;
-    unawaited(readEfuses());
+    unawaited(readEfuses(owner: owner));
   }
 
   /// `<chip>-<mac>`, for naming files dumped from the device.

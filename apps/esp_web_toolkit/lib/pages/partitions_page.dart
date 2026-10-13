@@ -88,6 +88,7 @@ class _PartitionsPageState extends State<PartitionsPage> {
   void dispose() {
     plan.removeListener(_rebuild);
     session.removeListener(_onSessionChanged);
+    session.cancelOperation(this);
     super.dispose();
   }
 
@@ -101,7 +102,7 @@ class _PartitionsPageState extends State<PartitionsPage> {
 
   Future<void> _dump(PartitionDefinition p) async {
     final data = await session.runDevice(
-        'Dump ${p.name}', (device) => device.loader.readFlash(p.offset, p.size, onProgress: (done, total) => session.reportProgress('Reading ${p.name}', done, total)));
+        'Dump ${p.name}', owner: this, (device) => device.loader.readFlash(p.offset, p.size, onProgress: (done, total) => session.reportProgress('Reading ${p.name}', done, total)));
     if (data != null) await saveBytes('${p.name}.bin', data);
   }
 
@@ -109,13 +110,13 @@ class _PartitionsPageState extends State<PartitionsPage> {
   Future<void> _dumpImage() async {
     final size = session.flashSize;
     if (size == null) return;
-    final data = await session.runDevice('Dump full flash', (d) => d.dumpImage(flashSize: size, onProgress: session.reportProgress));
+    final data = await session.runDevice('Dump full flash', owner: this, (d) => d.dumpImage(flashSize: size, onProgress: session.reportProgress));
     if (data != null) await saveBytes('${session.deviceStem}.img', data);
   }
 
   /// Every row on the device, virtual ones included, as a bundle.
   Future<void> _dumpBundle() async {
-    final zip = await session.runDevice('Dump bundle', (device) async {
+    final zip = await session.runDevice('Dump bundle', owner: this, (device) async {
       final archive = Archive();
       for (final p in plan.deviceRows) {
         final data = await device.loader.readFlash(p.offset, p.size, onProgress: (done, total) => session.reportProgress('Reading ${p.name}', done, total));

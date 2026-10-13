@@ -45,12 +45,13 @@ class _EfusePageState extends State<EfusePage> {
   @override
   void dispose() {
     session.removeListener(_onSessionChanged);
+    session.cancelOperation(this);
     _search.dispose();
     super.dispose();
   }
 
   void _onSessionChanged() {
-    if (mounted) Future<void>.microtask(session.ensureEfuses);
+    if (mounted) Future<void>.microtask(() => session.ensureEfuses(owner: this));
   }
 
   /// The raw blocks as JSON, enough to decode them again elsewhere.
@@ -87,7 +88,7 @@ class _EfusePageState extends State<EfusePage> {
         error: true,
         title: 'eFuses not read',
         message: 'See the log for the error.',
-        actions: [FilledButton.tonalIcon(onPressed: session.readEfuses, icon: const Icon(Icons.refresh), label: const Text('Try again'))],
+        actions: [FilledButton.tonalIcon(onPressed: () => session.readEfuses(owner: this), icon: const Icon(Icons.refresh), label: const Text('Try again'))],
       );
     }
     final scheme = Theme.of(context).colorScheme;
@@ -97,7 +98,7 @@ class _EfusePageState extends State<EfusePage> {
     ];
     return ListView(padding: const EdgeInsets.all(16), children: [
       Wrap(spacing: 8, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
-        FilledButton.tonalIcon(onPressed: busy ? null : session.readEfuses, icon: const Icon(Icons.refresh), label: const Text('Re-read')),
+        FilledButton.tonalIcon(onPressed: busy ? null : () => session.readEfuses(owner: this), icon: const Icon(Icons.refresh), label: const Text('Re-read')),
         MenuAnchor(
           builder: (context, controller, _) => OutlinedButton.icon(
             onPressed: () => controller.isOpen ? controller.close() : controller.open(),

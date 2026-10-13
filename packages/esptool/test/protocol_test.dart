@@ -128,6 +128,19 @@ void main() {
       await loader.dispose();
       await transport.close();
     });
+
+    test('cancelRequested stops the next command before it is sent', () async {
+      final transport = FakeTransport();
+      final loader = EspLoader(transport);
+      loader.cancelRequested = true;
+      await expectLater(loader.readReg(0), throwsA(isA<EspCancelledException>()));
+      expect(transport.writes, isEmpty);
+      loader.cancelRequested = false;
+      transport.feedResponse(EspCommand.readReg, value: 7, payload: [0x00, 0x00]);
+      expect(await loader.readReg(0), 7);
+      await loader.dispose();
+      await transport.close();
+    });
   });
 
   group('chip detection', () {

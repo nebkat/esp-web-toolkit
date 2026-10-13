@@ -81,6 +81,11 @@ class EspUnsupportedCommandException extends EspException {
   final int command;
 }
 
+/// The operation was stopped through [EspLoader.cancelRequested].
+class EspCancelledException extends EspException {
+  EspCancelledException() : super('Cancelled');
+}
+
 /// Talks to an ESP chip's bootloader over an [EspTransport], implementing the
 /// core of Espressif's esptool: SLIP framing, the command/response protocol,
 /// connection/sync, chip detection, flash read/write/erase, and uploading the
@@ -110,6 +115,13 @@ class EspLoader {
   int _baudRate;
   bool _isStub = false;
   bool _syncStubDetected = false;
+
+  /// Set to stop the operation in progress: its next command throws
+  /// [EspCancelledException] instead of being sent. A command already sent
+  /// still gets its reply, and a stub flash read finishes the chunk it is
+  /// streaming, so the chip is left ready for the next command. Stays set
+  /// (failing every command) until cleared.
+  bool cancelRequested = false;
 
   /// Whether the flasher stub is running (see [runStub]).
   bool get isStub => _isStub;
@@ -373,6 +385,7 @@ class EspLoader {
   }) async {
     data ??= Uint8List(0);
     if (op != null) {
+      if (cancelRequested) throw EspCancelledException();
       final packet = Uint8List(8 + data.length);
       final header = ByteData.sublistView(packet);
       header.setUint8(0, 0x00); // direction: request
@@ -625,6 +638,22 @@ class EspLoader {
     return out;
   }
 
+  /// Stub flash read, as one [_readFlashStubChunk] transfer per
+  /// [_readFlashChunk] bytes: the stub can't be stopped mid-transfer, so
+  /// this lets [cancelRequested] take effect between them.
+  Future<Uint8List> _readFlashStub(int offset, int length, void Function(int, int)? onProgress) async {
+    final out = Uint8List(length);
+    for (var at = 0; at < length; at += _readFlashChunk) {
+      final size = (length - at).clamp(0, _readFlashChunk);
+      final chunk = await _readFlashStubChunk(offset + at, size, (read, _) => onProgress?.call(at + read, length));
+      out.setRange(at, at + size, chunk);
+    }
+    return out;
+  }
+
+  /// Bytes per stub `READ_FLASH` transfer in [_readFlashStub].
+  static const int _readFlashChunk = 0x40000;
+
   /// Stub `READ_FLASH`: the stub pushes [flashSectorSize] frames, we ack each
   /// with the running byte count, and it finishes with a 16-byte MD5.
   ///
@@ -635,7 +664,7 @@ class EspLoader {
   /// acked, the digest consumed — and the sectors that came up short are
   /// then fetched again one by one with fresh `READ_FLASH` commands, before
   /// the assembled data is checked against the stub's digest.
-  Future<Uint8List> _readFlashStub(int offset, int length, void Function(int, int)? onProgress) async {
+  Future<Uint8List> _readFlashStubChunk(int offset, int length, void Function(int, int)? onProgress) async {
     final out = Uint8List(length);
     final bad = <int>[]; // offsets (within the region) of sectors that arrived short
     final digest = await _readFlashStream(offset, length, (at, frame) {

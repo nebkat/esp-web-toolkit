@@ -29,8 +29,9 @@ class IdfToolApp extends StatelessWidget {
   const IdfToolApp({super.key});
 
   /// The one-click flasher's route. `#/oneclick?bundle=<url>` is the link to
-  /// hand out, with the bundle's absolute URL; `&iframe` makes it the
-  /// compact flasher for embedding in another site.
+  /// hand out, with the bundle's absolute URL; `&remote=<ws url>` flashes a
+  /// device shared through a relay; `&iframe` makes it the compact flasher
+  /// for embedding in another site.
   static const oneClickPath = '/oneclick';
 
   /// The page that shares a device through a relay; it hands out links to
@@ -50,11 +51,11 @@ class IdfToolApp extends StatelessWidget {
       null => null,
     };
     // A remote device needs no Web Serial on this end.
-    if (!DeviceSession.supported && (remote == null || path == oneClickPath || path == relayPath)) return const UnsupportedBrowserPage();
+    if (!DeviceSession.supported && (remote == null || path == relayPath)) return const UnsupportedBrowserPage();
     if (path == relayPath) return RelayShell(relayUrl: switch (params['relay']) { final r? => parseRelayUrl(r), null => null });
     if (path == oneClickPath) {
       final bundle = params['bundle'];
-      return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle), embedded: params.containsKey('iframe'));
+      return OneClickShell(bundleUrl: bundle == null ? null : Uri.tryParse(bundle), remoteUrl: remote, embedded: params.containsKey('iframe'));
     }
     return HomeShell(initialTool: Tool.values.where((t) => '/${t.name}' == path).firstOrNull ?? Tool.partitions, remoteUrl: remote);
   }
@@ -221,8 +222,11 @@ class _HomeShellState extends State<HomeShell> {
 
 /// Owns a session for the one-click page, which has no rail, bar or log.
 class OneClickShell extends StatefulWidget {
-  const OneClickShell({super.key, this.bundleUrl, this.embedded = false});
+  const OneClickShell({super.key, this.bundleUrl, this.remoteUrl, this.embedded = false});
   final Uri? bundleUrl;
+
+  /// A shared device to flash, in place of a local port.
+  final Uri? remoteUrl;
   final bool embedded;
 
   @override
@@ -230,7 +234,9 @@ class OneClickShell extends StatefulWidget {
 }
 
 class _OneClickShellState extends State<OneClickShell> {
-  final _session = DeviceSession();
+  late final _session = DeviceSession()
+    ..remoteUrl = widget.remoteUrl
+    ..remoteSelected = widget.remoteUrl != null;
 
   @override
   void dispose() {

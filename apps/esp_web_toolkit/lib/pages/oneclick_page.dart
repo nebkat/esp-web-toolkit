@@ -19,6 +19,8 @@ import '../widgets/port_picker.dart';
 ///
 /// A bundle loaded from a URL can be shared as a link or as an `<iframe>`
 /// for another site; `&iframe` on the link is that [embedded] flasher.
+/// `&remote=<ws url>` flashes a device shared through a relay instead of
+/// one plugged in here.
 class OneClickPage extends StatefulWidget {
   const OneClickPage({super.key, required this.session, this.bundleUrl, this.bundle, this.onBack, this.embedded = false});
   final DeviceSession session;
@@ -70,6 +72,9 @@ class _OneClickPageState extends State<OneClickPage> {
 
   DeviceSession get session => widget.session;
 
+  /// The shared device in use, kept in the address bar and the copied link.
+  Uri? get _remote => session.remoteSelected ? session.remoteUrl : null;
+
   @override
   void initState() {
     super.initState();
@@ -95,7 +100,7 @@ class _OneClickPageState extends State<OneClickPage> {
     if (text.isEmpty) return setState(() => _urlProblem = 'Enter the URL of a bundle');
     final url = Uri.tryParse(text);
     if (url == null || !url.hasScheme || !url.hasAuthority) return setState(() => _urlProblem = 'Enter a full URL, starting with https://');
-    SystemNavigator.routeInformationUpdated(uri: Uri.parse(_route(url, embedded: widget.embedded)));
+    SystemNavigator.routeInformationUpdated(uri: Uri.parse(_route(url, embedded: widget.embedded, remote: _remote)));
     _fetch(url);
   }
 
@@ -155,12 +160,13 @@ class _OneClickPageState extends State<OneClickPage> {
         _forgetCheck();
       });
 
-  /// The fragment route for [bundle]: `/oneclick?bundle=…`, then `&iframe`
-  /// for the embedded flasher.
-  static String _route(Uri bundle, {required bool embedded}) => '${Uri(path: '/oneclick', queryParameters: {'bundle': '$bundle'})}${embedded ? '&iframe' : ''}';
+  /// The fragment route for [bundle]: `/oneclick?bundle=…`, `&remote=…` for
+  /// a shared device, then `&iframe` for the embedded flasher.
+  static String _route(Uri bundle, {required bool embedded, Uri? remote}) =>
+      '${Uri(path: '/oneclick', queryParameters: {'bundle': '$bundle', if (remote != null) 'remote': '$remote'})}${embedded ? '&iframe' : ''}';
 
   /// This version of the toolkit, opened at [_route].
-  static String _link(Uri bundle, {bool embedded = false}) => '${Uri.base.origin}${Uri.base.path}#${_route(bundle, embedded: embedded)}';
+  static String _link(Uri bundle, {bool embedded = false, Uri? remote}) => '${Uri.base.origin}${Uri.base.path}#${_route(bundle, embedded: embedded, remote: remote)}';
 
   /// The `<iframe>` for another site. Web Serial in a frame needs the
   /// embedding page to allow it (`allow="serial"`).
@@ -401,7 +407,7 @@ class _OneClickPageState extends State<OneClickPage> {
               IconButton(
                 tooltip: 'Open in ESP Web Toolkit',
                 icon: const Icon(Icons.open_in_new),
-                onPressed: () => web.window.open(_link(url), '_blank'),
+                onPressed: () => web.window.open(_link(url, remote: _remote), '_blank'),
               )
             else if (url != null)
               PopupMenuButton<void>(
@@ -409,7 +415,7 @@ class _OneClickPageState extends State<OneClickPage> {
                 icon: const Icon(Icons.share),
                 itemBuilder: (context) => [
                   PopupMenuItem(
-                    onTap: () => _copy(_link(url), 'Link'),
+                    onTap: () => _copy(_link(url, remote: _remote), 'Link'),
                     child: const ListTile(leading: Icon(Icons.link), title: Text('Copy link'), contentPadding: EdgeInsets.zero),
                   ),
                   PopupMenuItem(
@@ -609,7 +615,9 @@ class _OneClickPageState extends State<OneClickPage> {
     final flashing = _phase == _Phase.flashing;
     if (!session.connected) {
       return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Plug the device in over USB, then connect. Chrome will ask which port to use.'),
+        Text(_remote != null
+            ? 'Connect to ${session.deviceLabel}, shared through a relay.'
+            : 'Plug the device in over USB, then connect. Chrome will ask which port to use.'),
         const SizedBox(height: 12),
         Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
           FilledButton.icon(
@@ -619,10 +627,10 @@ class _OneClickPageState extends State<OneClickPage> {
                     if (!session.hasDevice) await session.requestPort();
                     if (session.hasDevice) await session.connect();
                   },
-            icon: session.busy ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.usb),
+            icon: session.busy ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)) : Icon(_remote != null ? Icons.cloud : Icons.usb),
             label: Text(session.busy ? 'Connecting…' : 'Connect device'),
           ),
-          if (session.ports.isNotEmpty) PortPicker(session: session, width: 360, enabled: !session.busy),
+          if (session.ports.isNotEmpty || session.remoteUrl != null) PortPicker(session: session, width: 360, enabled: !session.busy),
         ]),
         if (session.log.any((l) => l.error)) ...[
           const SizedBox(height: 8),

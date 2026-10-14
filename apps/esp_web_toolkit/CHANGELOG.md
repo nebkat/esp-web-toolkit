@@ -2,6 +2,10 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
+## 0.6.4 — 2026-10-14
+
+- One-click flasher: `&remote=<ws url>` on a bundle link flashes a device shared through a relay, with no Web Serial needed on this end; the copied link keeps it.
+
 ## 0.6.3 — 2026-10-13
 
 - Leaving a page stops the reads it started: an eFuse read, a partition or full-flash dump, or a data partition read no longer keeps the device busy after you move on.

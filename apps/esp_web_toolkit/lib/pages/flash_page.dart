@@ -20,7 +20,7 @@ import '../widgets/partition_grid.dart';
 /// only), the bootloader (`bootloader.bin`), the app (`@factory.bin` or
 /// `@ota.bin`) and the named partitions (`<name>.bin`). Rows take a
 /// dropped or picked file; the queued operations sit at the bottom until
-/// one doubly-confirmed Flash writes them — table, bootloader, app,
+/// one confirmed Flash writes them — table, bootloader, app,
 /// erases, then named writes.
 ///
 /// Works without a device, and the plan is kept and re-checked when one
@@ -37,6 +37,9 @@ class FlashPage extends StatefulWidget {
 const _tableKey = 'partition_table';
 const _appKey = '@app';
 const _partitionsKey = 'partitions';
+
+/// An operation that has been flashed.
+const _done = Colors.green;
 
 class _FlashPageState extends State<FlashPage> {
   /// The row a drag is currently over: a partition name or a box's key.
@@ -311,8 +314,8 @@ class _FlashPageState extends State<FlashPage> {
   // --------------------------------------------------------------------------
 
   /// Flash the plan in bundle order: table, bootloader, app, erases, named
-  /// writes — each leaving the plan as it completes so a failure leaves
-  /// exactly what is left.
+  /// writes. The plan is kept, to flash the next device the same way or to
+  /// retry; writes skip whatever already landed.
   Future<void> _flash() async {
     if (plan.isEmpty || !session.connected) return;
     // Every name must exist in the table it will resolve against, before anything is written.
@@ -324,112 +327,133 @@ class _FlashPageState extends State<FlashPage> {
       }
     }
     final table = plan.stagedTableMatches ? null : plan.stagedTable;
-    final differences = plan.tableDifferences ?? const <PartitionDifference>[];
     final bootloader = plan.bootloaderOp;
     final app = plan.app;
     final role = plan.appRole;
     final ops = plan.orderedOps;
     final erases = ops.where((op) => !op.isWrite).toList();
     final writes = ops.where((op) => op.isWrite).toList();
-    final lines = [
-      if (table != null)
-        '${'partition_table'.padRight(16)} ${plan.partitionTableOffset.hex.padLeft(10)}  Write ${plan.stagedTableSource}'
-            '${plan.stagedTableProblem == null ? '' : '   ⚠ VERIFICATION FAILED: ${plan.stagedTableProblem}'}',
-      if (table != null)
-        for (final d in differences) '${''.padRight(16)} ${''.padLeft(10)}    ${d.name}: ${d.describe()}',
-      if (plan.stagedTableMatches) '${'partition_table'.padRight(16)} ${plan.partitionTableOffset.hex.padLeft(10)}  Already matches the device — not written',
-      if (bootloader != null) _opLine(bootloader),
-      if (app != null)
-        '${role.fileStem.padRight(16)} ${(plan.appTarget ?? '').padLeft(10)}  Write ${app.name} (${app.bytes.length.bytesString}) to ${role.description}'
-            '${plan.appWarning == null ? '' : '   ⚠ ${plan.appWarning}'}',
-      for (final op in erases) _opLine(op),
-      for (final op in writes) _opLine(op),
-      for (final n in plan.nvsPlans) '${n.partition.padRight(16)} ${'values'.padLeft(10)}  ${n.summary}',
-      for (final f in plan.fsPlans) '${f.partition.padRight(16)} ${'files'.padLeft(10)}  ${f.summary}',
-    ];
     final count = plan.length - (plan.stagedTableMatches ? 1 : 0);
     final noun = 'operation${count == 1 ? '' : 's'}';
     if (!await confirm(context,
-        title: 'Flash $count $noun?',
-        message: '${lines.join('\n')}\n\n'
-            '${table == null ? '' : 'The table is written first; it only replaces the map — existing data is not moved or erased. '}'
-            'Writes skip sectors already holding the same data.',
-        action: 'Flash…')) {
-      return;
-    }
-    if (!mounted) return;
-    if (!await confirm(context,
-        title: 'Really flash ${session.chip!.name} ${session.macString ?? ''}?',
+        title: 'Flash ${session.chip!.name} ${session.macString ?? ''}?',
         message: 'This changes the connected device and cannot be undone.'
             '${plan.warningCount == 0 ? '' : '\n\n${plan.warningCount} of the operations carry warnings — check them above.'}',
         action: 'Flash now',
         destructive: true)) {
       return;
     }
+    final manual = plan.manual;
+    final nvsPlans = plan.nvsPlans;
+    final fsPlans = plan.fsPlans;
+    // One step per row of the plan panel, matched back to it by what it
+    // does, so each row can tick off in turn.
+    final tableStep = plan.stagedTable == null
+        ? null
+        : RunStep(kind: StepKind.table, name: 'partition_table', summary: table == null ? 'Already matches the device: not written' : 'Write ${plan.stagedTableSource}');
+    final bootloaderStep = bootloader == null ? null : RunStep(kind: StepKind.write, name: 'bootloader', summary: bootloader.summary);
+    final appStep = app == null
+        ? null
+        : RunStep(kind: StepKind.write, name: role.fileStem, summary: 'Write ${app.name} (${app.bytes.length.bytesString}) to ${role.description}');
+    final manualSteps = [for (final m in manual) RunStep(kind: StepKind.write, name: m.name, summary: m.summary)];
+    final opSteps = [
+      for (final op in [...erases, ...writes]) RunStep(kind: op.isWrite ? StepKind.write : StepKind.erase, name: op.partition.name, summary: op.summary),
+    ];
+    final nvsSteps = [for (final n in nvsPlans) RunStep(kind: StepKind.nvs, name: n.partition, summary: n.summary)];
+    final fsSteps = [for (final f in fsPlans) RunStep(kind: StepKind.fs, name: f.partition, summary: f.summary)];
+    plan.startRun([
+      if (tableStep != null) tableStep,
+      if (bootloaderStep != null) bootloaderStep,
+      if (appStep != null) appStep,
+      ...manualSteps,
+      ...opSteps,
+      ...nvsSteps,
+      ...fsSteps,
+    ]);
+
+    // Runs [op] as [step]: active, then done with what it returns, which
+    // is logged under [log] (the step's name by default).
+    Future<void> step(RunStep step, Future<String> Function() op, {String? log}) async {
+      plan.advanceRun(step, RunState.active);
+      final result = await op();
+      session.addLog('${log ?? step.name}: $result');
+      plan.advanceRun(step, RunState.done, result: result);
+    }
+
     await session.runDevice('Flash $count $noun', (device) async {
-      if (table != null) {
-        await device.writePartitionTable(table, force: true);
-        session.addLog('partition_table: written');
-      } else if (plan.stagedTableMatches) {
-        session.addLog('partition_table: already matches the device, not written');
-      }
-      if (plan.stagedTable != null) plan.tableFlashed();
-      if (bootloader != null) {
-        final outcome = await device.writePartition(bootloader.partition.name, bootloader.file!.bytes, onProgress: session.reportProgress);
-        session.addLog('bootloader: ${_describe(outcome)}');
-        plan.unstage(bootloader.partition.name);
-      }
-      if (app != null) {
-        switch (role) {
-          case FlashRole.factory:
-            final outcome = await device.factory(app.bytes, onProgress: session.reportProgress);
-            session.addLog('factory: ${_describe(outcome)}; OTA selection cleared');
-          case FlashRole.ota:
-            final result = await device.ota(app.bytes, onProgress: session.reportProgress);
-            session.addLog('ota: ${result.partition.name} ${_describe(result.outcome)}; boot switched to it');
+      try {
+        if (tableStep != null) {
+          await step(tableStep, () async {
+            if (table == null) return 'already matches the device, not written';
+            await device.writePartitionTable(table, force: true);
+            return 'written';
+          });
         }
-        plan.unstageApp();
-      }
-      for (final m in plan.manual) {
-        session.addLog("${m.name}: skipped — no partition of that name on this device", error: true);
-      }
-      for (final op in [...erases, ...writes]) {
-        final name = op.partition.name;
-        switch (op.kind) {
-          case OpKind.erase:
-            await device.erasePartition(name);
-            session.addLog('$name: erased ${op.partition.size.bytesString}');
-          case OpKind.write:
-            final outcome = await device.writePartition(name, op.file!.bytes, onProgress: session.reportProgress);
-            session.addLog('$name: ${_describe(outcome)}');
+        if (bootloader != null) {
+          await step(bootloaderStep!, () async => _describe(await device.writePartition(bootloader.partition.name, bootloader.file!.bytes, onProgress: session.reportProgress)));
         }
-        plan.unstage(name);
-      }
-      for (final n in plan.nvsPlans) {
-        final r = await device.editNvs(n.edits, partitionName: n.partition, keys: session.nvsKeys, onProgress: session.reportProgress);
-        for (final c in r.result.changes) {
-          session.addLog('${n.partition}: ${describeNvsChange(c)}');
+        if (app != null) {
+          await step(appStep!, () async {
+            switch (role) {
+              case FlashRole.factory:
+                return '${_describe(await device.factory(app.bytes, onProgress: session.reportProgress))}; OTA selection cleared';
+              case FlashRole.ota:
+                final result = await device.ota(app.bytes, onProgress: session.reportProgress);
+                return '${result.partition.name} ${_describe(result.outcome)}; boot switched to it';
+            }
+          }, log: role.name);
         }
-        plan.unstageNvsAll(n.partition);
-      }
-      for (final f in plan.fsPlans) {
-        final r = await device.editFs(
-          partitionName: f.partition,
-          put: {for (final e in f.put.entries) e.key: e.value.bytes},
-          delete: f.delete,
-          onProgress: session.reportProgress,
-        );
-        session.addLog('${f.partition}: ${r.put} file(s) put, ${r.deleted} deleted; ${_describe(r.outcome)}');
-        for (final m in r.missing) {
-          session.addLog('${f.partition}: $m was not there to delete');
+        for (final s in manualSteps) {
+          session.addLog('${s.name}: skipped — no partition of that name on this device', error: true);
+          plan.advanceRun(s, RunState.skipped, result: 'No partition of that name on this device');
         }
-        plan.unstageFsAll(f.partition);
+        for (final (i, op) in [...erases, ...writes].indexed) {
+          final name = op.partition.name;
+          await step(opSteps[i], () async {
+            switch (op.kind) {
+              case OpKind.erase:
+                await device.erasePartition(name);
+                return 'erased ${op.partition.size.bytesString}';
+              case OpKind.write:
+                return _describe(await device.writePartition(name, op.file!.bytes, onProgress: session.reportProgress));
+            }
+          });
+        }
+        for (final (i, n) in nvsPlans.indexed) {
+          await step(nvsSteps[i], () async {
+            final r = await device.editNvs(n.edits, partitionName: n.partition, keys: session.nvsKeys, onProgress: session.reportProgress);
+            for (final c in r.result.changes) {
+              session.addLog('${n.partition}: ${describeNvsChange(c)}');
+            }
+            return '${r.result.changes.length} value${r.result.changes.length == 1 ? '' : 's'} changed';
+          });
+        }
+        for (final (i, f) in fsPlans.indexed) {
+          await step(fsSteps[i], () async {
+            final r = await device.editFs(
+              partitionName: f.partition,
+              put: {for (final e in f.put.entries) e.key: e.value.bytes},
+              delete: f.delete,
+              onProgress: session.reportProgress,
+            );
+            for (final m in r.missing) {
+              session.addLog('${f.partition}: $m was not there to delete');
+            }
+            return '${r.put} file(s) put, ${r.deleted} deleted; ${_describe(r.outcome)}';
+          });
+        }
+      } catch (e) {
+        if (plan.run?.current case final current?) {
+          final stopped = e is EspCancelledException;
+          plan.advanceRun(current, stopped ? RunState.stopped : RunState.failed, result: stopped ? 'Stopped' : '$e');
+        }
+        rethrow;
+      } finally {
+        plan.finishRun();
       }
     });
     await session.readLayout();
   }
-
-  String _opLine(PlannedOp op) => '${op.partition.name.padRight(16)} ${(plan.offsetsKnown || op.partition.isPrimaryBootloader ? op.partition.offset.hex : 'by name').padLeft(10)}  ${op.summary}${op.warning == null ? '' : '   ⚠ ${op.warning}'}';
 
   static String _describe(WriteOutcome o) => o.skipped
       ? 'already in flash, nothing written'
@@ -503,6 +527,7 @@ class _FlashPageState extends State<FlashPage> {
       const SizedBox(height: 16),
       _PlanPanel(
           plan: plan,
+          session: session,
           busy: busy,
           offline: offline,
           onFlash: _flash,
@@ -983,9 +1008,12 @@ class _FlashPageState extends State<FlashPage> {
 }
 
 /// The queued operations, in flash order, with the button that runs them.
+/// A flash ticks them off here in turn, with Stop while it runs; the plan
+/// is kept afterwards for the next device.
 class _PlanPanel extends StatelessWidget {
   const _PlanPanel({
     required this.plan,
+    required this.session,
     required this.busy,
     required this.offline,
     required this.onFlash,
@@ -998,6 +1026,7 @@ class _PlanPanel extends StatelessWidget {
     required this.onDiscardTable,
   });
   final FlashPlan plan;
+  final DeviceSession session;
   final bool busy;
   final bool offline;
   final VoidCallback onFlash;
@@ -1019,19 +1048,74 @@ class _PlanPanel extends StatelessWidget {
     final writes = ops.where((op) => op.isWrite).toList();
     final count = plan.length;
     final bundleable = !plan.isEmpty;
+    final run = plan.run;
+    final flashing = run != null && !run.finished;
+
+    // A row's step in the last flash, matched by what it does (the table's
+    // summary depends on the device, so it goes by name alone).
+    RunStep? stepFor(StepKind kind, String name, String summary) =>
+        run?.steps.where((s) => s.kind == kind && s.name == name && (kind == StepKind.table || s.summary == summary)).firstOrNull;
+    Widget? leading(RunStep? s) => run == null
+        ? null
+        : SizedBox(
+            width: 24,
+            child: Center(
+              child: switch (s?.state) {
+                null => null,
+                RunState.pending => Icon(Icons.radio_button_unchecked, size: 18, color: scheme.outline),
+                RunState.active => const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                RunState.done => Tooltip(message: s!.result ?? 'Flashed', child: const Icon(Icons.check_circle, size: 18, color: _done)),
+                RunState.skipped => Icon(Icons.remove_circle_outline, size: 18, color: scheme.error),
+                RunState.stopped => Tooltip(message: 'Stopped part way', child: Icon(Icons.stop_circle, size: 18, color: scheme.error)),
+                RunState.failed => Icon(Icons.error, size: 18, color: scheme.error),
+              },
+            ),
+          );
+    String? failure(RunStep? s) => s?.state == RunState.failed || s?.state == RunState.skipped ? s!.result : null;
+    Widget tile({required StepKind kind, required IconData icon, required String name, required String detail, required String summary, String? warning, VoidCallback? onRemove}) {
+      final s = stepFor(kind, name, summary);
+      return OpTile(
+          icon: icon,
+          name: name,
+          detail: detail,
+          summary: summary,
+          warning: failure(s) ?? warning,
+          leading: leading(s),
+          onRemove: busy ? null : onRemove);
+    }
+
+    final total = run?.steps.length ?? 0;
+    final done = run?.steps.where((s) => s.state == RunState.done).length ?? 0;
+    final (status, statusColor) = switch (run) {
+      null => (null, null),
+      FlashRun(finished: false) => ('Flashing: $done of $total done', scheme.primary),
+      FlashRun(stopped: true) => ('Stopped after $done of $total', scheme.error),
+      FlashRun(failed: true) => ('Failed after $done of $total', scheme.error),
+      _ => ('Flashed', _done),
+    };
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('Planned operations', style: theme.textTheme.titleMedium),
+          Row(children: [
+            Expanded(child: Text('Planned operations', style: theme.textTheme.titleMedium)),
+            if (status != null) Text(status, style: theme.textTheme.titleSmall?.copyWith(color: statusColor)),
+            if (run != null && run.finished)
+              IconButton(tooltip: 'Clear the ticks', icon: const Icon(Icons.close, size: 18), visualDensity: VisualDensity.compact, onPressed: plan.dismissRun),
+          ]),
           const SizedBox(height: 4),
-          Text(plan.addressing, style: TextStyle(color: scheme.outline)),
+          Text(
+              run != null && run.finished && (run.stopped || run.failed)
+                  ? 'A partition stopped part way is left half written: flash again before relying on it. Writes skip whatever already landed.'
+                  : plan.addressing,
+              style: TextStyle(color: run != null && run.finished && (run.stopped || run.failed) ? scheme.error : scheme.outline)),
           const SizedBox(height: 8),
           if (plan.isEmpty)
             Text('Nothing planned yet.', style: TextStyle(color: scheme.outline))
           else ...[
             if (plan.stagedTable != null)
-              OpTile(
+              tile(
+                kind: StepKind.table,
                 icon: plan.stagedTableProblem == null ? Icons.table_chart : Icons.error_outline,
                 name: 'partition_table',
                 detail: plan.partitionTableOffset.hex,
@@ -1050,7 +1134,8 @@ class _PlanPanel extends StatelessWidget {
                 onRemove: onDiscardTable,
               ),
             if (bootloader != null)
-              OpTile(
+              tile(
+                  kind: StepKind.write,
                   icon: Icons.upload_file,
                   name: 'bootloader',
                   detail: bootloader.partition.offset.hex,
@@ -1058,7 +1143,8 @@ class _PlanPanel extends StatelessWidget {
                   warning: bootloader.warning,
                   onRemove: () => onRemove(bootloader.partition.name)),
             if (plan.app case final app?)
-              OpTile(
+              tile(
+                  kind: StepKind.write,
                   icon: Icons.upload_file,
                   name: plan.appRole.fileStem,
                   detail: plan.appTarget ?? plan.appRole.label,
@@ -1066,7 +1152,8 @@ class _PlanPanel extends StatelessWidget {
                   warning: plan.appWarning,
                   onRemove: onRemoveApp),
             for (final op in erases)
-              OpTile(
+              tile(
+                  kind: StepKind.erase,
                   icon: Icons.delete_outline,
                   name: op.partition.name,
                   detail: plan.offsetsKnown ? op.partition.offset.hex : 'by name',
@@ -1074,7 +1161,8 @@ class _PlanPanel extends StatelessWidget {
                   warning: op.warning,
                   onRemove: () => onRemove(op.partition.name)),
             for (final op in writes)
-              OpTile(
+              tile(
+                  kind: StepKind.write,
                   icon: Icons.upload_file,
                   name: op.partition.name,
                   detail: plan.offsetsKnown ? op.partition.offset.hex : 'by name',
@@ -1082,16 +1170,18 @@ class _PlanPanel extends StatelessWidget {
                   warning: op.warning,
                   onRemove: () => onRemove(op.partition.name)),
             for (final (i, m) in plan.manual.indexed)
-              OpTile(icon: Icons.upload_file, name: m.name, detail: 'by name', summary: m.summary, warning: m.warning, onRemove: () => onRemoveManual(i)),
+              tile(kind: StepKind.write, icon: Icons.upload_file, name: m.name, detail: 'by name', summary: m.summary, warning: m.warning, onRemove: () => onRemoveManual(i)),
             for (final n in plan.nvsPlans)
-              OpTile(
+              tile(
+                  kind: StepKind.nvs,
                   icon: Icons.edit_note,
                   name: n.partition,
                   detail: plan.row(n.partition)?.offset.hex ?? 'by name',
                   summary: n.summary,
                   onRemove: () => plan.unstageNvsAll(n.partition)),
             for (final f in plan.fsPlans)
-              OpTile(
+              tile(
+                  kind: StepKind.fs,
                   icon: Icons.folder_outlined,
                   name: f.partition,
                   detail: plan.row(f.partition)?.offset.hex ?? 'by name',
@@ -1099,45 +1189,74 @@ class _PlanPanel extends StatelessWidget {
                   onRemove: () => plan.unstageFsAll(f.partition)),
           ],
           const SizedBox(height: 12),
-          Row(children: [
-            Expanded(
-              child: Text(
-                plan.isEmpty
-                    ? ''
-                    : '$count operation${count == 1 ? '' : 's'}, ${plan.bytesToWrite.bytesString} to write'
-                        '${plan.warningCount == 0 ? '' : ', ${plan.warningCount} with warnings'}',
-                style: TextStyle(color: scheme.outline),
+          if (flashing)
+            _progress(theme, run)
+          else
+            Row(children: [
+              Expanded(
+                child: Text(
+                  plan.isEmpty
+                      ? ''
+                      : '$count operation${count == 1 ? '' : 's'}, ${plan.bytesToWrite.bytesString} to write'
+                          '${plan.warningCount == 0 ? '' : ', ${plan.warningCount} with warnings'}',
+                  style: TextStyle(color: scheme.outline),
+                ),
               ),
-            ),
-            TextButton.icon(onPressed: plan.isEmpty || busy ? null : onClear, icon: const Icon(Icons.clear_all), label: const Text('Clear plan')),
-            const SizedBox(width: 8),
-            OutlinedButton.icon(
-                onPressed: bundleable ? onPreview : null,
-                icon: const Icon(Icons.visibility_outlined),
-                label: const Text('Preview'),
+              TextButton.icon(onPressed: plan.isEmpty || busy ? null : onClear, icon: const Icon(Icons.clear_all), label: const Text('Clear plan')),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                  onPressed: bundleable ? onPreview : null,
+                  icon: const Icon(Icons.visibility_outlined),
+                  label: const Text('Preview'),
+                ),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(onPressed: bundleable ? onSaveBundle : null, icon: const Icon(Icons.archive_outlined), label: const Text('Save as bundle')),
+              const SizedBox(width: 16),
+              FilledButton.icon(
+                onPressed: plan.isEmpty || busy || offline ? null : onFlash,
+                style: FilledButton.styleFrom(
+                  backgroundColor: scheme.error,
+                  foregroundColor: scheme.onError,
+                  padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
+                  textStyle: theme.textTheme.titleMedium,
+                ),
+                icon: const Icon(Icons.flash_on),
+                label: Text(offline
+                    ? 'Connect a device to flash'
+                    : plan.isEmpty
+                        ? 'Flash'
+                        : 'Flash $count operation${count == 1 ? '' : 's'}'),
               ),
-            const SizedBox(width: 8),
-            OutlinedButton.icon(onPressed: bundleable ? onSaveBundle : null, icon: const Icon(Icons.archive_outlined), label: const Text('Save as bundle')),
-            const SizedBox(width: 16),
-            FilledButton.icon(
-              onPressed: plan.isEmpty || busy || offline ? null : onFlash,
-              style: FilledButton.styleFrom(
-                backgroundColor: scheme.error,
-                foregroundColor: scheme.onError,
-                padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 20),
-                textStyle: theme.textTheme.titleMedium,
-              ),
-              icon: const Icon(Icons.flash_on),
-              label: Text(offline
-                  ? 'Connect a device to flash'
-                  : plan.isEmpty
-                      ? 'Flash'
-                      : 'Flash $count operation${count == 1 ? '' : 's'}'),
-            ),
-          ]),
+            ]),
         ]),
       ),
     );
+  }
+
+  /// In place of the buttons while flashing: the running operation's
+  /// progress, and Stop.
+  Widget _progress(ThemeData theme, FlashRun run) {
+    final progress = session.progress;
+    return Row(children: [
+      Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          LinearProgressIndicator(value: progress?.fraction),
+          const SizedBox(height: 4),
+          Text(progress == null ? run.current?.name ?? 'Working…' : '${progress.label}: ${progress.done.bytesString} / ${progress.total.bytesString}',
+              style: theme.textTheme.bodySmall),
+        ]),
+      ),
+      const SizedBox(width: 16),
+      Tooltip(
+        message: 'Stop at the next command; the operation running now is left part done',
+        child: OutlinedButton.icon(
+          onPressed: session.stopping ? null : session.stopOperation,
+          style: OutlinedButton.styleFrom(foregroundColor: theme.colorScheme.error),
+          icon: const Icon(Icons.stop),
+          label: Text(session.stopping ? 'Stopping…' : 'Stop'),
+        ),
+      ),
+    ]);
   }
 }
 

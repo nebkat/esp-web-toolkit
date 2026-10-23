@@ -113,6 +113,36 @@ enum TableSource { device, file }
 /// Whether that table is written too, or only names the partitions.
 enum TableUse { reference, flash }
 
+enum RunState { pending, active, done, skipped, failed, stopped }
+
+/// What a [RunStep] does.
+enum StepKind { table, write, erase, nvs, fs }
+
+/// One operation of a [FlashRun], as the plan panel showed it when the
+/// flash started; [kind], [name] and [summary] find its row there.
+class RunStep {
+  RunStep({required this.kind, required this.name, required this.summary});
+  final StepKind kind;
+  final String name;
+  final String summary;
+  RunState state = RunState.pending;
+
+  /// What happened, once it has: "wrote 1.2 MB in 2 regions in 3.1 s".
+  String? result;
+}
+
+/// A flash in progress, or the last one: its operations tick off in order
+/// while the plan itself drops each one as it completes.
+class FlashRun {
+  FlashRun(this.steps);
+  final List<RunStep> steps;
+  bool finished = false;
+
+  bool get stopped => steps.any((s) => s.state == RunState.stopped);
+  bool get failed => steps.any((s) => s.state == RunState.failed);
+  RunStep? get current => steps.where((s) => s.state == RunState.active).firstOrNull;
+}
+
 /// The changes queued for a device, in the bundle's terms: a partition
 /// table (the device's or a file's, flashed or reference only), a
 /// bootloader, one app flashed by role, and a write or erase per named
@@ -329,13 +359,6 @@ class FlashPlan extends ChangeNotifier {
     final notes = _reconcile();
     notifyListeners();
     return notes;
-  }
-
-  /// The staged table is now on the device.
-  void tableFlashed() {
-    _deviceTable = stagedTable ?? _deviceTable;
-    _tableUse = TableUse.reference;
-    notifyListeners();
   }
 
   /// One line saying what named partitions resolve against, and so whether
@@ -642,6 +665,33 @@ class FlashPlan extends ChangeNotifier {
   // Whole plan
   // --------------------------------------------------------------------------
 
+  /// The flash running now, or the last one until it is dismissed or the
+  /// plan cleared.
+  FlashRun? get run => _run;
+  FlashRun? _run;
+
+  void startRun(List<RunStep> steps) {
+    _run = FlashRun(steps);
+    notifyListeners();
+  }
+
+  /// Move [step] of [run] on to [state].
+  void advanceRun(RunStep step, RunState state, {String? result}) {
+    step.state = state;
+    step.result = result ?? step.result;
+    notifyListeners();
+  }
+
+  void finishRun() {
+    _run?.finished = true;
+    notifyListeners();
+  }
+
+  void dismissRun() {
+    _run = null;
+    notifyListeners();
+  }
+
   /// The staged table and the device's are the same: flashing skips it.
   bool get stagedTableMatches => stagedTable != null && (tableDifferences?.isEmpty ?? false);
 
@@ -659,6 +709,7 @@ class FlashPlan extends ChangeNotifier {
       (stagedTableProblem == null ? 0 : 1);
 
   void clear() {
+    _run = null;
     _ops.clear();
     _manual.clear();
     _app = null;

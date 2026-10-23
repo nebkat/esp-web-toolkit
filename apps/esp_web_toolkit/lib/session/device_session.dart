@@ -758,6 +758,17 @@ class DeviceSession extends ChangeNotifier {
     if (state == SessionState.busy && identical(_owner, owner)) _loader?.cancelRequested = true;
   }
 
+  /// Stop whatever is running at its next command, writes included: the
+  /// Stop button, pressed knowing a partition may be left half written.
+  void stopOperation() {
+    if (state != SessionState.busy) return;
+    _loader?.cancelRequested = true;
+    notifyListeners();
+  }
+
+  /// [stopOperation] was asked for and the operation hasn't ended yet.
+  bool get stopping => state == SessionState.busy && (_loader?.cancelRequested ?? false);
+
   /// Read the partition table, OTA selection and app descriptors into [plan].
   Future<void> readLayout() => runDevice('Read partition table', (device) async {
         final table = await device.partitionTable(refresh: true);

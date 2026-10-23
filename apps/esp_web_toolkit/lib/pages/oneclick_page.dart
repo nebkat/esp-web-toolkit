@@ -1,3 +1,4 @@
+import 'package:esptool/esptool.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
@@ -60,6 +61,9 @@ class _OneClickPageState extends State<OneClickPage> {
   String? _fileProblem;
   int _currentStep = -1;
   final _completed = <int>{};
+  /// The flash in [_Phase.failed] was stopped with the Stop button.
+  bool _stopped = false;
+
   /// The log appears once a device has been connected and stays for good.
   bool _logShown = false;
 
@@ -235,6 +239,7 @@ class _OneClickPageState extends State<OneClickPage> {
     } else {
       setState(() {
         _phase = _Phase.failed;
+        _stopped = failure is EspCancelledException;
         _problem = failure == null ? 'The device disconnected during flashing' : '$failure';
       });
     }
@@ -389,7 +394,7 @@ class _OneClickPageState extends State<OneClickPage> {
                     : i == _currentStep && flashing
                         ? const SizedBox.square(dimension: 16, child: CircularProgressIndicator(strokeWidth: 2))
                         : _phase == _Phase.failed && i == _currentStep
-                            ? Icon(Icons.error, size: 18, color: theme.colorScheme.error)
+                            ? Icon(_stopped ? Icons.stop_circle : Icons.error, size: 18, color: theme.colorScheme.error)
                             : Text('${i + 1}.', style: theme.textTheme.bodyMedium),
               ),
             ),
@@ -458,9 +463,13 @@ class _OneClickPageState extends State<OneClickPage> {
                     child: const Text('Flash another')),
               ]),
             _Phase.failed => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text('Flashing failed: $_problem', style: TextStyle(color: theme.colorScheme.error)),
+                Text(_stopped ? 'Flashing stopped before it finished.' : 'Flashing failed: $_problem', style: TextStyle(color: theme.colorScheme.error)),
                 const SizedBox(height: 8),
-                Text('Reconnect the device and try again. If it keeps failing, send the log below to support.', style: theme.textTheme.bodySmall),
+                Text(
+                    _stopped
+                        ? 'The device may not start properly until it has been flashed in full. Flash it again to finish.'
+                        : 'Reconnect the device and try again. If it keeps failing, send the log below to support.',
+                    style: theme.textTheme.bodySmall),
                 const SizedBox(height: 8),
                 FilledButton.tonal(
                     onPressed: () => setState(() {
@@ -678,7 +687,15 @@ class _OneClickPageState extends State<OneClickPage> {
                   : 'Flash'),
         ),
         const SizedBox(width: 12),
-        if (!flashing) TextButton(onPressed: () => session.disconnect(hardReset: false), child: const Text('Disconnect')),
+        if (flashing)
+          OutlinedButton.icon(
+            onPressed: session.stopping ? null : session.stopOperation,
+            style: OutlinedButton.styleFrom(foregroundColor: theme.colorScheme.error),
+            icon: const Icon(Icons.stop),
+            label: Text(session.stopping ? 'Stopping…' : 'Stop'),
+          )
+        else
+          TextButton(onPressed: () => session.disconnect(hardReset: false), child: const Text('Disconnect')),
       ]),
       if (flashing && session.progress != null) ...[
         const SizedBox(height: 12),

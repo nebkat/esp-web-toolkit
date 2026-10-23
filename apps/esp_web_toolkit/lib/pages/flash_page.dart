@@ -326,6 +326,7 @@ class _FlashPageState extends State<FlashPage> {
         return session.addLog('Not flashing: ${absent.join(', ')} ${absent.length == 1 ? 'is' : 'are'} not partitions on this device', error: true);
       }
     }
+    if (plan.tableSizeProblem case final problem?) return session.addLog('Not flashing: $problem', error: true);
     final table = plan.stagedTableMatches ? null : plan.stagedTable;
     final bootloader = plan.bootloaderOp;
     final app = plan.app;
@@ -385,7 +386,7 @@ class _FlashPageState extends State<FlashPage> {
         if (tableStep != null) {
           await step(tableStep, () async {
             if (table == null) return 'already matches the device, not written';
-            await device.writePartitionTable(table, force: true);
+            await device.writePartitionTable(table, force: true, flashSize: session.flashSize);
             return 'written';
           });
         }
@@ -636,6 +637,7 @@ class _FlashPageState extends State<FlashPage> {
                 style: TextStyle(color: scheme.outline)),
           if (problem != null) TextSpan(text: 'VERIFICATION FAILED: $problem', style: TextStyle(color: scheme.error)),
           if (plan.tableSource == TableSource.file && problem == null) _comparison(scheme, flash: flash),
+          if (plan.tableSizeProblem case final size?) TextSpan(text: '${fromFile || plan.byName ? '. ' : ''}$size', style: TextStyle(color: scheme.error)),
         ])),
         planned: flash && table != null ? 'Write $sourceLabel' : null,
         warning: flash ? problem : null,
@@ -1130,7 +1132,7 @@ class _PlanPanel extends StatelessWidget {
                             ? "Never write ${plan.stagedTableSource}: a device whose partitions used differ is refused"
                             : 'Never write ${plan.stagedTableSource}: a device laid out differently is refused',
                       },
-                warning: plan.stagedTableProblem == null ? null : 'Verification failed: ${plan.stagedTableProblem}',
+                warning: plan.tableSizeProblem ?? (plan.stagedTableProblem == null ? null : 'Verification failed: ${plan.stagedTableProblem}'),
                 onRemove: onDiscardTable,
               ),
             if (bootloader != null)

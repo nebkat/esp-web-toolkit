@@ -351,6 +351,7 @@ class DeviceSession extends ChangeNotifier {
         partitionTableOffset: device.partitionTableOffset,
         partitionTableSize: device.partitionTableSize,
         primaryBootloaderOffset: device.primaryBootloaderOffset,
+        flashSize: flashSize,
       )) {
         addLog(note, error: true);
       }

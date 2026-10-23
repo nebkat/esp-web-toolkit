@@ -46,6 +46,20 @@ fctry,    data, nvs,     0x230000, 0x6000
     expect(comparePartitionTables(table(layout), null).every((d) => d.actual == null), isTrue);
   });
 
+  test("a table reaching past the device's flash blocks the flash", () {
+    expect(flashSizeProblem(table(layout), 0x400000), isNull);
+    expect(flashSizeProblem(table(layout), null), isNull);
+    expect(flashSizeProblem(table(layout), 0x200000), "The partition layout needs 2.19 MB of flash ('storage' ends at 0x230000), but the device has 2 MB");
+
+    // The bundle's own table, or else the device's, which names resolve against.
+    final withTable = bundle({'partition_table.csv': layout, 'storage.bin': Uint8List(4)});
+    expect(checkBundle(withTable, table(layout), flashSize: 0x200000).blocker, contains('needs 2.19 MB'));
+    expect(checkBundle(withTable, table(layout), flashSize: 0x400000).blocker, isNull);
+    expect(checkBundle(withTable, table(layout)).blocker, isNull);
+    final byName = bundle({'storage.bin': Uint8List(4)});
+    expect(checkBundle(byName, table(layout), flashSize: 0x200000).sizeProblem, isNotNull);
+  });
+
   test('table policy parses, round-trips and reaches the table step', () {
     expect(() => FlashManifest.fromJson({'table': 'sometimes'}), throwsA(predicate((e) => '$e'.contains('"table"'))));
     expect(() => FlashManifest.fromJson({'tableMatch': 'mostly'}), throwsA(predicate((e) => '$e'.contains('"tableMatch"'))));

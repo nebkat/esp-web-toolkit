@@ -199,7 +199,7 @@ class _OneClickPageState extends State<OneClickPage> {
     _checkStarted = true;
     final check = await session.runDevice(
         'Check the device',
-        (device) async => checkBundle(bundle, await readDeviceTable(device)));
+        (device) async => checkBundle(bundle, await readDeviceTable(device), flashSize: session.flashSize));
     if (mounted && identical(bundle, _bundle)) setState(() => _check = check);
   }
 
@@ -225,6 +225,7 @@ class _OneClickPageState extends State<OneClickPage> {
           nvsKeys: session.nvsKeys,
           log: session.addLog,
           chooseTable: (_) async => _tableChoice,
+          flashSize: session.flashSize,
         );
         _completed.add(_currentStep);
       } catch (e) {
@@ -385,7 +386,8 @@ class _OneClickPageState extends State<OneClickPage> {
             name: row.name,
             detail: row.detail,
             summary: row.summary,
-            warning: _check?.missing[i] ?? (bundle.steps[i] is WriteTableStep && (_check?.tableChanges ?? false) ? _check!.blocker : null),
+            warning: _check?.missing[i] ??
+                (bundle.steps[i] is WriteTableStep && ((_check?.tableChanges ?? false) || _check?.sizeProblem != null) ? _check!.blocker : null),
             leading: SizedBox(
               width: 24,
               child: Center(

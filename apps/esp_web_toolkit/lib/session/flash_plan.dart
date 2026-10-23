@@ -181,6 +181,7 @@ class FlashPlan extends ChangeNotifier {
   final _fs = <String, FsPlan>{};
 
   bool _connected = false;
+  int? _flashSize;
 
   // --------------------------------------------------------------------------
   // Geometry and device
@@ -208,9 +209,10 @@ class FlashPlan extends ChangeNotifier {
 
   /// Called on connect with the device's geometry. A plan built offline is
   /// kept and re-checked against it; returns notes about anything dropped.
-  List<String> attach({required EspChip chip, required int partitionTableOffset, required int partitionTableSize, int? primaryBootloaderOffset}) {
+  List<String> attach({required EspChip chip, required int partitionTableOffset, required int partitionTableSize, int? primaryBootloaderOffset, int? flashSize}) {
     _connected = true;
     _chip = chip;
+    _flashSize = flashSize;
     _partitionTableOffset = partitionTableOffset;
     _partitionTableSize = partitionTableSize;
     _primaryBootloaderOffset = primaryBootloaderOffset;
@@ -227,6 +229,7 @@ class FlashPlan extends ChangeNotifier {
   /// dropped) and goes on without a table.
   void detach() {
     _connected = false;
+    _flashSize = null;
     _deviceTable = null;
     _deviceApps = const {};
     _otadata = null;
@@ -300,6 +303,13 @@ class FlashPlan extends ChangeNotifier {
   PartitionTable? get stagedTable => _tableUse == TableUse.flash ? table : null;
   String? get stagedTableSource => _tableSource == TableSource.file ? _fileTableSource : "the device's own table";
   String? get stagedTableProblem => _tableSource == TableSource.file ? _fileTableProblem : null;
+
+  /// The table a flash lands by (the staged one, else the device's) reaches
+  /// past the end of the connected device's flash: flashing is refused.
+  String? get tableSizeProblem => switch (stagedTable ?? _deviceTable) {
+        final t? => flashSizeProblem(t, _flashSize),
+        null => null,
+      };
 
   /// Show [table] from a file; the use is unchanged.
   List<String> openTableFile(PartitionTable table, {required String source}) {
@@ -706,7 +716,8 @@ class FlashPlan extends ChangeNotifier {
       _ops.values.where((op) => op.warning != null).length +
       _manual.where((m) => m.warning != null).length +
       (_appWarningText == null ? 0 : 1) +
-      (stagedTableProblem == null ? 0 : 1);
+      (stagedTableProblem == null ? 0 : 1) +
+      (tableSizeProblem == null ? 0 : 1);
 
   void clear() {
     _run = null;

@@ -121,6 +121,7 @@ class BundleCheck {
     this.used = const {},
     this.missing = const {},
     this.conflicts = const [],
+    this.sizeProblem,
   });
 
   /// The device's table; `null` when it has none that can be read.
@@ -145,6 +146,11 @@ class BundleCheck {
   /// Named writes or erases of a partition a role file also picks (see
   /// [bundleConflicts]).
   final List<String> conflicts;
+
+  /// The table names resolve against reaches past the end of the device's
+  /// flash (see [flashSizeProblem]); `null` when it fits or the size is
+  /// unknown.
+  final String? sizeProblem;
 
   bool get carriesTable => table != null;
   bool get tableMatches => table != null && differences.isEmpty;
@@ -175,6 +181,7 @@ class BundleCheck {
 
   /// Why this bundle cannot be flashed onto this device at all, if it can't.
   String? get blocker {
+    if (sizeProblem != null) return sizeProblem;
     if (tableChanges && policy == TablePolicy.require && !canKeepLayout) {
       return deviceTable == null
           ? 'This update needs a device that already has its partition layout, and this one has none'
@@ -188,10 +195,22 @@ class BundleCheck {
   }
 }
 
+/// Why [table] cannot be used on a chip with [flashSize] bytes of flash:
+/// a partition ends past it. `null` when it fits or [flashSize] is unknown.
+String? flashSizeProblem(PartitionTable table, int? flashSize) {
+  if (flashSize == null || table.isEmpty) return null;
+  final last = table.reduce((a, b) => b.end > a.end ? b : a);
+  if (last.end <= flashSize) return null;
+  String mb(int n) => n % 0x100000 == 0 ? '${n ~/ 0x100000} MB' : '${(n / 0x100000).toStringAsFixed(2)} MB';
+  return "The partition layout needs ${mb(last.end)} of flash ('${last.name}' ends at ${hex(last.end)}), "
+      'but the device has ${mb(flashSize)}';
+}
+
 /// Check [bundle] against [deviceTable] (see [BundleCheck]). A bundle that
 /// carries a table writes it first, so every name resolves against that
-/// table; otherwise against the device's.
-BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable) {
+/// table; otherwise against the device's. With the device's [flashSize],
+/// that table must also fit in its flash.
+BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable, {int? flashSize}) {
   final table = bundle.contents.table;
   final current = table ?? deviceTable;
   final missing = <int, String>{};
@@ -256,6 +275,7 @@ BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable) {
     differences: table == null ? const [] : comparePartitionTables(table, deviceTable),
     used: used,
     missing: missing,
+    sizeProblem: current == null ? null : flashSizeProblem(current, flashSize),
     conflicts: current == null
         ? const []
         : bundleConflicts(

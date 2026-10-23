@@ -433,7 +433,8 @@ typedef FlashStepCallback = void Function(int index, FlashStep step);
 /// differing table under [TablePolicy.ask], [chooseTable] decides: update it,
 /// keep the device's (where [BundleCheck.canKeepLayout]), or `null` to flash
 /// nothing (as without a callback). A table that already matches, or one
-/// that is kept, is not written.
+/// that is kept, is not written. With the device's [flashSize] (from
+/// `EspLoader.attachFlash`), a table that doesn't fit in it stops it too.
 ///
 /// [nvsKeys] decrypt and re-encrypt the partition for `set-nvs` steps on an
 /// encrypted NVS partition. Keys never come from the bundle itself.
@@ -446,11 +447,12 @@ Future<void> runFlashBundle(
   NvsKeys? nvsKeys,
   void Function(String message)? log,
   Future<TableChoice?> Function(BundleCheck check)? chooseTable,
+  int? flashSize,
 }) async {
   if (bundle.chip != null && device.chip != bundle.chip) {
     throw IdfToolException('This bundle is for ${bundle.chip!.name}, but the connected device is a ${device.chip.name}');
   }
-  final check = checkBundle(bundle, await readDeviceTable(device));
+  final check = checkBundle(bundle, await readDeviceTable(device), flashSize: flashSize);
   if (check.blocker case final blocker?) throw IdfToolException(blocker);
   final choice = check.automaticChoice ?? await chooseTable?.call(check);
   if (choice == null || (choice == TableChoice.keep && check.tableChanges && !check.canKeepLayout)) {
@@ -490,7 +492,7 @@ Future<void> runFlashBundle(
         } else if (choice == TableChoice.keep) {
           log?.call("partition table differs outside this update's partitions; the device's is kept");
         } else {
-          await device.writePartitionTable(table);
+          await device.writePartitionTable(table, flashSize: flashSize);
           log?.call('partition table written');
         }
       case WriteBootloaderStep(:final file):

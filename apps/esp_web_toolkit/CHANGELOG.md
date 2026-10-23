@@ -2,6 +2,12 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
+## 0.6.5 — 2026-10-23
+
+- Flash page: the planned operations tick off as they flash, with a Stop button while it runs, and the plan is kept afterwards to flash the next device the same way. The second confirmation is gone.
+- One-click flasher: a Stop button while flashing.
+- A partition table that reaches past the connected device's flash is refused before anything is written, on both the Flash page and the one-click flasher.
+
 ## 0.6.4 — 2026-10-14
 
 - One-click flasher: `&remote=<ws url>` on a bundle link flashes a device shared through a relay, with no Web Serial needed on this end; the copied link keeps it.

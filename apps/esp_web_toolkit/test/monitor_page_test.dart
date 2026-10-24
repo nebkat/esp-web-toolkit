@@ -1,3 +1,8 @@
+// The page and the session talk to the browser (package:web): run with
+// `flutter test --platform chrome`.
+@TestOn('browser')
+library;
+
 import 'dart:convert';
 
 import 'package:esp_monitor/esp_monitor.dart';

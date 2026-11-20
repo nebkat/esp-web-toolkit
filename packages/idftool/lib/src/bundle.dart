@@ -24,6 +24,7 @@ import 'device.dart';
 import 'manifest.dart';
 import 'partition_table.dart';
 import 'partition_table_files.dart';
+import 'table_offset.dart';
 
 
 /// Marks a role file rather than a partition name.
@@ -44,6 +45,8 @@ class BundleContents {
     this.manifest,
     List<String>? ignored,
     Map<String, Uint8List>? files,
+    this.partitionTableOffset = PartitionTable.defaultOffset,
+    this.recordedPartitionTableOffset,
   })  : partitions = partitions ?? {},
         ignored = ignored ?? [],
         files = files ?? {};
@@ -54,6 +57,14 @@ class BundleContents {
   /// The entry [table] came from (`partition_table.csv` or `.bin`).
   final String? tableFile;
   final Uint8List? bootloader;
+
+  /// Where [bootloader] records the partition table; `null` without one, or
+  /// when it records none.
+  final int? recordedPartitionTableOffset;
+
+  /// The offset a CSV [table] was laid out for: [recordedPartitionTableOffset],
+  /// else the one [readBundle] was given.
+  final int partitionTableOffset;
   final Uint8List? factoryApp;
   final Uint8List? otaApp;
 
@@ -68,6 +79,21 @@ class BundleContents {
   /// manifest steps that name files directly.
   final Map<String, Uint8List> files;
 
+  /// These contents with [table], laid out for [partitionTableOffset].
+  BundleContents withTable(PartitionTable table, int partitionTableOffset) => BundleContents(
+        table: table,
+        tableFile: tableFile,
+        bootloader: bootloader,
+        factoryApp: factoryApp,
+        otaApp: otaApp,
+        partitions: partitions,
+        manifest: manifest,
+        ignored: ignored,
+        files: files,
+        partitionTableOffset: partitionTableOffset,
+        recordedPartitionTableOffset: recordedPartitionTableOffset,
+      );
+
   bool get isEmpty => table == null && bootloader == null && factoryApp == null && otaApp == null && partitions.isEmpty;
 
   /// Whether the bundle addresses partitions by name against a table it
@@ -77,6 +103,9 @@ class BundleContents {
 
 /// Read [zip] by the filename convention. Throws [IdfToolException] for a
 /// bad ZIP, both role files at once, or an unknown `@` file.
+///
+/// A CSV table is laid out for where the bundle's `bootloader.bin` records
+/// the table, else for [partitionTableOffset] (the device's).
 BundleContents readBundle(
   Uint8List zip, {
   int partitionTableOffset = PartitionTable.defaultOffset,
@@ -90,6 +119,7 @@ BundleContents readBundle(
   }
   PartitionTable? table;
   String? tableFile;
+  Uint8List? tableBytes;
   Uint8List? bootloader, factoryApp, otaApp;
   final partitions = <String, Uint8List>{};
   FlashManifest? manifest;
@@ -109,10 +139,7 @@ BundleContents readBundle(
     if (name == FlashManifest.fileName) {
       manifest = FlashManifest.fromJson(jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>);
     } else if (stem == 'partition_table' && (ext == 'csv' || ext == 'bin')) {
-      table = PartitionTable.isBinary(bytes)
-          ? PartitionTable.fromBinary(bytes)
-          : parsePartitionTableCsv(PartitionTable.decodeCsv(bytes),
-              source: name, partitionTableOffset: partitionTableOffset, primaryBootloaderOffset: primaryBootloaderOffset);
+      tableBytes = bytes;
       tableFile = name;
     } else if (ext != 'bin') {
       ignored.add(name);
@@ -134,6 +161,14 @@ BundleContents readBundle(
   if (factoryApp != null && otaApp != null) {
     throw IdfToolException('A bundle cannot carry both ${bundleRolePrefix}factory.bin and ${bundleRolePrefix}ota.bin');
   }
+  final recorded = bootloader == null ? null : partitionTableOffsetOfBootloader(bootloader);
+  final tableOffset = recorded ?? partitionTableOffset;
+  if (tableBytes != null) {
+    table = PartitionTable.isBinary(tableBytes)
+        ? PartitionTable.fromBinary(tableBytes)
+        : parsePartitionTableCsv(PartitionTable.decodeCsv(tableBytes),
+            source: tableFile!, partitionTableOffset: tableOffset, primaryBootloaderOffset: primaryBootloaderOffset);
+  }
   return BundleContents(
     table: table,
     tableFile: tableFile,
@@ -144,6 +179,8 @@ BundleContents readBundle(
     manifest: manifest,
     ignored: ignored,
     files: files,
+    partitionTableOffset: tableOffset,
+    recordedPartitionTableOffset: recorded,
   );
 }
 

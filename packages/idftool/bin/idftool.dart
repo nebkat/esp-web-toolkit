@@ -22,7 +22,10 @@ Future<void> main(List<String> args) async {
     ..argParser.addFlag('no-reset', negatable: false, help: 'Do not reset the chip after operations')
     ..argParser.addFlag('no-stub', negatable: false, help: 'Talk to the ROM loader only (no flasher stub)')
     ..argParser.addOption('partition-table-file', help: 'Partition table CSV/binary to use instead of the device\'s')
-    ..argParser.addOption('partition-table-offset', defaultsTo: '0x8000', help: 'Partition table offset')
+    ..argParser.addOption('partition-table-offset',
+        help: 'Partition table offset (where to read the table from flash, or place it when loading from CSV). '
+            'Default: where the bootloader records it (experimental, espressif/esp-idf#19102), else 0x8000. '
+            'Writing a table elsewhere than the bootloader records needs --force')
     ..argParser.addOption('partition-table-size', defaultsTo: '0x1000', help: 'Partition table size')
     ..argParser.addOption('primary-bootloader-offset', help: 'Primary bootloader offset (used when loading a CSV)')
     ..argParser.addOption('recovery-bootloader-offset', help: 'Recovery bootloader offset (used when loading a CSV)')
@@ -367,7 +370,16 @@ int _int(String? s, {String what = 'value'}) =>
 abstract class _Command extends Command<void> {
   ArgResults get global => globalResults!;
 
-  int get partitionTableOffset => _int(global['partition-table-offset'] as String, what: 'partition table offset');
+  /// `--partition-table-offset`, or `null` to go by the bootloader's record.
+  int? get explicitPartitionTableOffset =>
+      global['partition-table-offset'] == null ? null : _int(global['partition-table-offset'] as String, what: 'partition table offset');
+
+  /// Where the table is: [device]'s (see [IdfDevice.partitionTableOffset]),
+  /// else `--partition-table-offset`, else 0x8000.
+  int partitionTableOffsetOf(IdfDevice? device) =>
+      device?.partitionTableOffset ?? explicitPartitionTableOffset ?? PartitionTable.defaultOffset;
+
+  static void warn(String message) => stderr.writeln('Warning: $message');
   int get partitionTableSize => _int(global['partition-table-size'] as String, what: 'partition table size');
   WriteStrategy get strategy => switch (global['diff'] as String) {
         'always' || 'auto' => WriteStrategy.differential,
@@ -382,20 +394,14 @@ abstract class _Command extends Command<void> {
     return byChip?.bootloaderFlashOffset ?? _int(text, what: option);
   }
 
-  /// Load `--partition-table-file` if given.
-  PartitionTable? tableFromFile(EspChip? chip) {
+  /// Load `--partition-table-file` if given, laid out for [device]'s table
+  /// offset and checked against its bootloader's record.
+  PartitionTable? tableFromFile(EspChip? chip, {IdfDevice? device}) {
     final path = global['partition-table-file'] as String?;
     if (path == null) return null;
-    final bytes = File(path).readAsBytesSync();
-    if (bytes.isEmpty) throw IdfToolException("Partition table file '$path' is empty");
-    if (PartitionTable.isBinary(bytes)) return PartitionTable.fromBinary(bytes).requireNotEmpty("file '$path'");
-    return parsePartitionTableCsv(
-      PartitionTable.decodeCsv(bytes),
-      source: "file '$path'",
-      partitionTableOffset: partitionTableOffset,
-      primaryBootloaderOffset: _bootloaderOffset('primary-bootloader-offset', chip),
-      recoveryBootloaderOffset: _bootloaderOffset('recovery-bootloader-offset', chip),
-    );
+    final table = loadTableArg(path, chip, device: device);
+    checkTableRow(table, device?.recordedPartitionTableOffset, writing: false, warn: warn);
+    return table;
   }
 
   /// Connect, run [body], then reset and close.
@@ -422,11 +428,16 @@ abstract class _Command extends Command<void> {
       final flashSize = await loader.attachFlash() ?? 4 * 1024 * 1024;
       if (!(global['no-stub'] as bool)) await loader.runStub();
       stderr.writeln('Connected: ${chip.name}, ${flashSize ~/ (1024 * 1024)} MB flash${loader.isStub ? ', stub running' : ''}');
-      final device = IdfDevice(loader,
-          partitionTableOffset: partitionTableOffset,
+      final device = await IdfDevice.open(loader,
+          partitionTableOffset: explicitPartitionTableOffset,
           partitionTableSize: partitionTableSize,
-          primaryBootloaderOffset: _bootloaderOffset('primary-bootloader-offset', chip));
-      final table = tableFromFile(chip);
+          primaryBootloaderOffset: _bootloaderOffset('primary-bootloader-offset', chip),
+          flashSize: flashSize,
+          warn: warn);
+      if (device.recordedPartitionTableOffset case final recorded?) {
+        stderr.writeln('The bootloader records the partition table at ${hex(recorded)} ($recordedTableOffsetNote)');
+      }
+      final table = tableFromFile(chip, device: device);
       if (table != null) device.usePartitionTable(table);
       await body(device, flashSize);
       if (!(global['no-reset'] as bool)) {
@@ -445,14 +456,15 @@ abstract class _Command extends Command<void> {
     throw UsageException(ports.isEmpty ? 'No USB serial ports found' : 'Several ports found, pass --port: ${ports.join(', ')}', '');
   }
 
-  /// Read a partition table from a file argument (CSV or binary).
-  PartitionTable loadTableArg(String path, EspChip? chip) {
+  /// Read a partition table from a file argument (CSV or binary), a CSV laid
+  /// out for [device]'s table offset ([partitionTableOffsetOf]).
+  PartitionTable loadTableArg(String path, EspChip? chip, {IdfDevice? device}) {
     final bytes = File(path).readAsBytesSync();
     if (bytes.isEmpty) throw IdfToolException("Partition table file '$path' is empty");
     if (PartitionTable.isBinary(bytes)) return PartitionTable.fromBinary(bytes).requireNotEmpty("file '$path'");
     return parsePartitionTableCsv(PartitionTable.decodeCsv(bytes),
         source: "file '$path'",
-        partitionTableOffset: partitionTableOffset,
+        partitionTableOffset: partitionTableOffsetOf(device),
         primaryBootloaderOffset: _bootloaderOffset('primary-bootloader-offset', chip),
         recoveryBootloaderOffset: _bootloaderOffset('recovery-bootloader-offset', chip));
   }
@@ -636,17 +648,19 @@ class _WriteTable extends _Command {
   @override
   final description = 'Flash a partition table from a CSV or binary file';
   _WriteTable() {
-    argParser.addFlag('force', negatable: false, help: 'Flash even if verification fails');
+    argParser.addFlag('force', negatable: false, help: "Flash even if verification fails, or the table isn't where the bootloader records it");
   }
   @override
   Future<void> run() async {
     final file = _arg(argResults!, 0, 'table file');
     await withDevice((device, flashSize) async {
-      final table = loadTableArg(file, device.chip);
+      final force = argResults!['force'] as bool;
+      final offset = device.partitionTableOffset;
+      final table = loadTableArg(file, device.chip, device: device);
       stdout.writeln(table.format());
-      stderr.writeln('\nWriting partition table to ${hex(device.partitionTableOffset)}...\n'
+      stderr.writeln('\nWriting partition table to ${hex(offset)}...\n'
           'Note: this replaces only the partition map; existing partition data is not moved, resized or erased.');
-      await device.writePartitionTable(table, force: argResults!['force'] as bool, flashSize: flashSize);
+      await device.writePartitionTable(table, force: force, flashSize: flashSize);
       stderr.writeln('Partition table written');
     });
   }
@@ -817,12 +831,15 @@ class _WriteImage extends _Command {
   final description = 'Write a whole-flash image (erasing the whole flash first unless --no-erase)';
   _WriteImage() {
     argParser.addFlag('erase', defaultsTo: true);
+    argParser.addFlag('force', negatable: false, help: "Write the image even if its partition table isn't where its bootloader records it");
   }
   @override
   Future<void> run() => withDevice((device, _) async {
         final image = File(_arg(argResults!, 0, 'image file')).readAsBytesSync();
-        reportWrite('image',
-            await device.writeImage(image, erase: argResults!['erase'] as bool, strategy: strategy, onProgress: progress));
+        reportWrite(
+            'image',
+            await device.writeImage(image,
+                erase: argResults!['erase'] as bool, force: argResults!['force'] as bool, strategy: strategy, onProgress: progress));
       });
 }
 
@@ -835,12 +852,20 @@ class _PrintImage extends _Command {
   Future<void> run() async {
     final path = _arg(argResults!, 0, 'image file');
     final image = File(path).readAsBytesSync();
+    // Where the image's bootloader records its table, unless --partition-table-offset says otherwise.
+    final recorded = partitionTableOffsetOfImage(image);
+    final explicit = explicitPartitionTableOffset;
+    if (explicit != null) checkTableOffset(explicit, recorded, '--partition-table-offset', writing: false, warn: _Command.warn);
+    final partitionTableOffset = explicit ?? recorded ?? PartitionTable.defaultOffset;
     if (image.length <= partitionTableOffset) {
       throw IdfToolException("Image '$path' (${hex(image.length)} bytes) does not contain a partition table at ${hex(partitionTableOffset)}");
     }
-    final table = PartitionTable.fromBinary(
-            Uint8List.sublistView(image, partitionTableOffset, (partitionTableOffset + partitionTableSize).clamp(0, image.length)))
-        .requireNotEmpty("image at offset ${hex(partitionTableOffset)}");
+    final binary = Uint8List.sublistView(image, partitionTableOffset, (partitionTableOffset + partitionTableSize).clamp(0, image.length));
+    if (isErased(binary)) {
+      throw IdfToolException('No partition table in the image at offset ${hex(partitionTableOffset)}: the flash there is erased');
+    }
+    final table = PartitionTable.fromBinary(binary).requireNotEmpty("image at offset ${hex(partitionTableOffset)}");
+    checkTableRow(table, recorded, writing: false, warn: _Command.warn);
     Future<Uint8List> read(int offset, int length) async {
       final out = Uint8List(length)..fillRange(0, length, 0xFF);
       if (offset < image.length) out.setRange(0, (length).clamp(0, image.length - offset), image, offset);
@@ -871,10 +896,13 @@ class _WriteBundle extends _Command {
   final name = 'write-bundle';
   @override
   final description = 'Flash every binary in a bundle ZIP';
+  _WriteBundle() {
+    argParser.addFlag('force', negatable: false, help: "Write the bundle's table even where its bootloader would not find it");
+  }
   @override
   Future<void> run() => withDevice((device, _) async {
         final zip = File(_arg(argResults!, 0, 'bundle file')).readAsBytesSync();
-        final outcomes = await device.writeBundle(zip, strategy: strategy, onProgress: progress);
+        final outcomes = await device.writeBundle(zip, force: argResults!['force'] as bool, strategy: strategy, onProgress: progress);
         outcomes.forEach(reportWrite);
       });
 }
@@ -889,8 +917,14 @@ class _PrintBundle extends _Command {
     final path = _arg(argResults!, 0, 'bundle file');
     final archive = ZipDecoder().decodeBytes(File(path).readAsBytesSync());
     final csv = archive.find('partition_table.csv') ?? (throw IdfToolException("Bundle '$path' has no partition_table.csv"));
+    // Laid out for where the bundle's bootloader records the table, unless --partition-table-offset says otherwise.
+    final bootloader = archive.find('bootloader.bin')?.readBytes();
+    final recorded = bootloader == null ? null : partitionTableOffsetOfBootloader(bootloader);
+    final explicit = explicitPartitionTableOffset;
+    if (explicit != null) checkTableOffset(explicit, recorded, '--partition-table-offset', writing: false, warn: _Command.warn);
     final table = parsePartitionTableCsv(PartitionTable.decodeCsv(csv.readBytes()!),
-        source: "bundle '$path'", partitionTableOffset: partitionTableOffset);
+        source: "bundle '$path'", partitionTableOffset: explicit ?? recorded ?? PartitionTable.defaultOffset);
+    checkTableRow(table, recorded, writing: false, warn: _Command.warn);
     Future<Uint8List> read(int offset, int length) async {
       final p = table.where((p) => p.offset == offset).firstOrNull;
       final file = p == null ? null : archive.find('${p.name}.bin');

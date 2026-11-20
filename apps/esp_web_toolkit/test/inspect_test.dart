@@ -6,6 +6,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:esptool/esptool.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:idftool/idftool.dart';
 import 'package:esp_web_toolkit/util/inspect.dart';
@@ -61,6 +62,39 @@ void main() {
     final i = await inspect('flash.bin', image);
     expect(i.kind, FileKind.flashImage);
     expect(i.bootloader, isNull);
+  });
+
+  test('flash image whose bootloader moves the table', () async {
+    // An ESP32-S3 bootloader (booted from 0x0) whose description records the table at 0x10000.
+    final bootloader = Uint8List(0x130);
+    final view = ByteData.sublistView(bootloader);
+    bootloader[0] = ImageHeader.magic;
+    bootloader[1] = 1;
+    view.setUint16(12, EspChip.esp32s3.imageChipId, Endian.little);
+    view.setUint32(ImageHeader.size + 4, 0x100, Endian.little);
+    bootloader[BootloaderDescription.imageOffset] = BootloaderDescription.magic;
+    view.setUint32(BootloaderDescription.imageOffset + 64, 0x10000, Endian.little);
+    var checksum = ImageMetadata.checksumMagic;
+    for (final b in Uint8List.sublistView(bootloader, ImageHeader.size + 8, ImageHeader.size + 8 + 0x100)) {
+      checksum ^= b;
+    }
+    bootloader[bootloader.length - 1] = checksum;
+    final table = PartitionTable.fromCsv('nvs, data, nvs, , 0x6000\nfactory, app, factory, , 1M\n', partitionTableOffset: 0x10000);
+    final image = Uint8List(0x20000)..fillRange(0, 0x20000, 0xFF);
+    image.setRange(0, bootloader.length, bootloader);
+    image.setRange(0x10000, 0x10000 + table.toBinary().length, table.toBinary());
+
+    final i = await inspect('flash.bin', image);
+    expect(i.kind, FileKind.flashImage);
+    expect(i.bootloader, EspChip.esp32s3);
+    expect(i.table!.findByName('nvs')!.offset, 0x11000);
+    expect(i.summary, contains('partition table at 0x10000'));
+    expect(i.report, contains('Partition table:  0x10000'));
+    expect(i.problem, isNull);
+
+    final b = await inspect('bootloader.bin', bootloader);
+    expect(b.kind, FileKind.bootloaderImage);
+    expect(b.summary, contains('reads the partition table at 0x10000'));
   });
 
   test('unknown bytes', () async {

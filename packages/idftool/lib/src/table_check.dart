@@ -122,6 +122,8 @@ class BundleCheck {
     this.missing = const {},
     this.conflicts = const [],
     this.sizeProblem,
+    this.tableOffset,
+    this.deviceTableOffset,
   });
 
   /// The device's table; `null` when it has none that can be read.
@@ -151,6 +153,19 @@ class BundleCheck {
   /// flash (see [flashSizeProblem]); `null` when it fits or the size is
   /// unknown.
   final String? sizeProblem;
+
+  /// Where the bootloader will read the table once the bundle is flashed:
+  /// where the bundle's own `bootloader.bin` records it, else where the
+  /// device's does. `null` when not known.
+  final int? tableOffset;
+
+  /// Where the device's table is now; `null` when not known.
+  final int? deviceTableOffset;
+
+  /// The bundle's bootloader reads the table somewhere other than where the
+  /// device's is, so the table has to be written there whatever it holds.
+  /// Shown in [differences] as the `partition_table` row moving.
+  bool get tableMoves => tableOffset != null && deviceTableOffset != null && tableOffset != deviceTableOffset;
 
   bool get carriesTable => table != null;
   bool get tableMatches => table != null && differences.isEmpty;
@@ -182,6 +197,10 @@ class BundleCheck {
   /// Why this bundle cannot be flashed onto this device at all, if it can't.
   String? get blocker {
     if (sizeProblem != null) return sizeProblem;
+    if (tableMoves && table == null) {
+      return "This update's bootloader reads the partition table at ${hex(tableOffset!)}, but this device's is at "
+          '${hex(deviceTableOffset!)}, and the update carries no table to put there';
+    }
     if (tableChanges && policy == TablePolicy.require && !canKeepLayout) {
       return deviceTable == null
           ? 'This update needs a device that already has its partition layout, and this one has none'
@@ -210,7 +229,11 @@ String? flashSizeProblem(PartitionTable table, int? flashSize) {
 /// carries a table writes it first, so every name resolves against that
 /// table; otherwise against the device's. With the device's [flashSize],
 /// that table must also fit in its flash.
-BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable, {int? flashSize}) {
+///
+/// [deviceTableOffset] is where the device's table is, and [tableOffset]
+/// where it has to be once the bundle is flashed (see
+/// [BundleCheck.tableMoves]); `checkBundleOnDevice` fills both in.
+BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable, {int? flashSize, int? deviceTableOffset, int? tableOffset}) {
   final table = bundle.contents.table;
   final current = table ?? deviceTable;
   final missing = <int, String>{};
@@ -267,12 +290,23 @@ BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable, {int? f
     }
     if (problem != null) missing[i] = problem;
   }
+  final differences = table == null ? <PartitionDifference>[] : comparePartitionTables(table, deviceTable);
+  if (table != null &&
+      tableOffset != null &&
+      deviceTableOffset != null &&
+      tableOffset != deviceTableOffset &&
+      !differences.any((d) => (d.expected ?? d.actual)!.isPrimaryPartitionTable)) {
+    final moved = PartitionDefinition.partitionTable(offset: tableOffset, size: PartitionTable.size);
+    differences.insert(0,
+        PartitionDifference(moved.name, expected: moved, actual: PartitionDefinition.partitionTable(offset: deviceTableOffset, size: PartitionTable.size)));
+    used.add(moved.name);
+  }
   return BundleCheck(
     deviceTable: deviceTable,
     table: table,
     policy: bundle.manifest?.tablePolicy ?? TablePolicy.update,
     match: bundle.manifest?.tableMatch ?? TableMatch.exact,
-    differences: table == null ? const [] : comparePartitionTables(table, deviceTable),
+    differences: differences,
     used: used,
     missing: missing,
     sizeProblem: current == null ? null : flashSizeProblem(current, flashSize),
@@ -292,6 +326,8 @@ BundleCheck checkBundle(FlashBundle bundle, PartitionTable? deviceTable, {int? f
             hasFactory: bundle.contents.factoryApp != null,
             hasOta: bundle.contents.otaApp != null,
           ),
+    tableOffset: tableOffset,
+    deviceTableOffset: deviceTableOffset,
   );
 }
 

@@ -5,6 +5,7 @@ import 'package:esptool/esptool.dart';
 import 'bundle.dart';
 import 'device.dart';
 import 'flash/differential.dart';
+import 'int_literal.dart';
 import 'nvs/nvs.dart';
 import 'partition_table.dart';
 import 'table_check.dart';
@@ -416,6 +417,33 @@ class FlashBundle {
   }
 
   Uint8List file(String name) => files[name] ?? (throw IdfToolException("File '$name' is not in the bundle"));
+
+  /// This bundle with its CSV table laid out for where it will go on
+  /// [device] ([IdfDevice.partitionTableOffsetFor] its `bootloader.bin`),
+  /// when [fromZip] laid it out for somewhere else.
+  FlashBundle forDevice(IdfDevice device) {
+    final tableFile = contents.tableFile;
+    if (tableFile == null) return this;
+    final offset = device.partitionTableOffsetFor(bootloader: contents.bootloader).offset;
+    final bytes = file(tableFile);
+    if (offset == contents.partitionTableOffset || PartitionTable.isBinary(bytes)) return this;
+    final table = parsePartitionTable(bytes,
+        source: tableFile, partitionTableOffset: offset, primaryBootloaderOffset: device.primaryBootloaderOffset);
+    return FlashBundle(
+        name: name, description: description, chip: chip, steps: steps, contents: contents.withTable(table, offset), files: files);
+  }
+}
+
+/// Check [bundle] ([FlashBundle.forDevice]) against [device]'s table, and
+/// against where the table has to be once the bundle's bootloader is in
+/// (see [checkBundle]).
+Future<BundleCheck> checkBundleOnDevice(IdfDevice device, FlashBundle bundle, {int? flashSize}) async {
+  bundle = bundle.forDevice(device);
+  final deviceTable = await readDeviceTable(device);
+  return checkBundle(bundle, deviceTable,
+      flashSize: flashSize,
+      deviceTableOffset: device.partitionTableOffset,
+      tableOffset: device.partitionTableOffsetFor(bootloader: bundle.contents.bootloader).offset);
 }
 
 /// Progress of a [runFlashBundle]: which step is running (0-based) and the
@@ -436,6 +464,12 @@ typedef FlashStepCallback = void Function(int index, FlashStep step);
 /// that is kept, is not written. With the device's [flashSize] (from
 /// `EspLoader.attachFlash`), a table that doesn't fit in it stops it too.
 ///
+/// The table goes where the bundle's `bootloader.bin` records it, else
+/// where the device's bootloader does; a bundle whose bootloader moves it
+/// writes its table there even when the layout matches, and is refused
+/// without a table to write ([BundleCheck.tableMoves]). A table placed away
+/// from where the bootloader records it is refused unless [force].
+///
 /// [nvsKeys] decrypt and re-encrypt the partition for `set-nvs` steps on an
 /// encrypted NVS partition. Keys never come from the bundle itself.
 Future<void> runFlashBundle(
@@ -448,11 +482,13 @@ Future<void> runFlashBundle(
   void Function(String message)? log,
   Future<TableChoice?> Function(BundleCheck check)? chooseTable,
   int? flashSize,
+  bool force = false,
 }) async {
   if (bundle.chip != null && device.chip != bundle.chip) {
     throw IdfToolException('This bundle is for ${bundle.chip!.name}, but the connected device is a ${device.chip.name}');
   }
-  final check = checkBundle(bundle, await readDeviceTable(device), flashSize: flashSize);
+  bundle = bundle.forDevice(device);
+  final check = await checkBundleOnDevice(device, bundle, flashSize: flashSize);
   if (check.blocker case final blocker?) throw IdfToolException(blocker);
   final choice = check.automaticChoice ?? await chooseTable?.call(check);
   if (choice == null || (choice == TableChoice.keep && check.tableChanges && !check.canKeepLayout)) {
@@ -485,15 +521,18 @@ Future<void> runFlashBundle(
         final r = await device.ota(bundle.file(file), strategy: strategy, onProgress: onProgress);
         log?.call('${r.partition.name}: ${outcome(r.outcome)}; boot slot switched');
       case WriteTableStep(:final file):
+        final bootloader = bundle.contents.bootloader;
         final table = parsePartitionTable(bundle.file(file),
-            source: file, partitionTableOffset: device.partitionTableOffset, primaryBootloaderOffset: device.primaryBootloaderOffset);
+            source: file,
+            partitionTableOffset: device.partitionTableOffsetFor(bootloader: bootloader).offset,
+            primaryBootloaderOffset: device.primaryBootloaderOffset);
         if (check.tableMatches) {
           log?.call('partition table already matches; not written');
         } else if (choice == TableChoice.keep) {
           log?.call("partition table differs outside this update's partitions; the device's is kept");
         } else {
-          await device.writePartitionTable(table, flashSize: flashSize);
-          log?.call('partition table written');
+          await device.writePartitionTable(table, flashSize: flashSize, bootloader: bootloader, force: force);
+          log?.call('partition table written at ${hex(device.partitionTableOffset)}');
         }
       case WriteBootloaderStep(:final file):
         final entry = (await device.resolver()).bootloaderEntry ??

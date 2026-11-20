@@ -192,7 +192,40 @@ class FlashPlan extends ChangeNotifier {
   EspChip? get chip => _chip;
   bool get connected => _connected;
   int? get primaryBootloaderOffset => _primaryBootloaderOffset;
-  int get partitionTableOffset => _partitionTableOffset;
+
+  /// Where the device's partition table is: where its bootloader records it,
+  /// else 0x8000 (and 0x8000 offline).
+  int get deviceTableOffset => _partitionTableOffset;
+
+  /// Where the partition table is once the plan is flashed: where the staged
+  /// bootloader records it, else where the device's is.
+  int get partitionTableOffset => bootloaderTableOffset ?? _partitionTableOffset;
+
+  /// Where the staged bootloader records the partition table; `null` when
+  /// none is staged or it records none.
+  int? get bootloaderTableOffset => _recordedBy(_ops[_bootloaderName]?.file?.bytes);
+
+  /// The staged bootloader reads its table somewhere other than where the
+  /// connected device's is, so the table has to be written there.
+  bool get tableMoves => _connected && partitionTableOffset != _partitionTableOffset;
+
+  /// Why the plan can't be flashed as it stands because its bootloader moves
+  /// the table and no table is staged to put there.
+  String? get tableMoveProblem => tableMoves && stagedTable == null
+      ? "The bootloader reads the partition table at ${partitionTableOffset.hex}, but the device's is at ${_partitionTableOffset.hex}: "
+          'flash a partition table too, so there is one where it looks'
+      : null;
+
+  static const _bootloaderName = 'bootloader';
+
+  static int? _recordedBy(Uint8List? bootloader) {
+    if (bootloader == null) return null;
+    try {
+      return partitionTableOffsetOfBootloader(bootloader);
+    } on IdfToolException {
+      return null;
+    }
+  }
 
   PartitionTable? get deviceTable => _deviceTable;
   Map<int, AppDescription> get deviceApps => _deviceApps;
@@ -282,7 +315,15 @@ class FlashPlan extends ChangeNotifier {
   List<PartitionDifference>? get tableDifferences {
     final t = table, device = _deviceTable;
     if (t == null || device == null) return null;
-    return identical(t, device) ? const [] : comparePartitionTables(t, device);
+    final differences = identical(t, device) ? <PartitionDifference>[] : comparePartitionTables(t, device);
+    if (tableMoves && !differences.any((d) => (d.expected ?? d.actual)!.isPrimaryPartitionTable)) {
+      differences.insert(
+          0,
+          PartitionDifference('partition_table',
+              expected: PartitionDefinition.partitionTable(offset: partitionTableOffset, size: _partitionTableSize),
+              actual: PartitionDefinition.partitionTable(offset: _partitionTableOffset, size: _partitionTableSize)));
+    }
+    return differences;
   }
 
   /// The table opened from a file, whether or not it is the source in use.
@@ -317,7 +358,7 @@ class FlashPlan extends ChangeNotifier {
     _fileTableSource = source;
     _fileTableProblem = null;
     try {
-      table.verify(partitionTableOffset: _partitionTableOffset);
+      table.verify(partitionTableOffset: partitionTableOffset);
     } catch (e) {
       _fileTableProblem = '$e';
     }
@@ -406,10 +447,11 @@ class FlashPlan extends ChangeNotifier {
           if (!p.isPrimaryBootloader && !p.isPrimaryPartitionTable) (namesOnly ? _deviceTable?.findByName(p.name) : null) ?? p
       ];
 
-  /// The virtual bootloader row for the current chip, if known.
+  /// The virtual bootloader row for the current chip, if known: up to the
+  /// partition table it will read ([partitionTableOffset]).
   PartitionDefinition? get bootloaderRow {
     final offset = _primaryBootloaderOffset;
-    return offset == null ? null : PartitionDefinition.bootloader(offset: offset, size: _partitionTableOffset - offset);
+    return offset == null ? null : PartitionDefinition.bootloader(offset: offset, size: partitionTableOffset - offset);
   }
 
   /// Every addressable row: bootloader, then the table's partitions.
@@ -509,12 +551,31 @@ class FlashPlan extends ChangeNotifier {
   // Bootloader and named partitions
   // --------------------------------------------------------------------------
 
-  PlannedOp? get bootloaderOp => bootloaderRow == null ? null : _ops[bootloaderRow!.name];
+  PlannedOp? get bootloaderOp => _primaryBootloaderOffset == null ? null : _ops[_bootloaderName];
 
+  /// Stage [file] as the bootloader. One that records where its partition
+  /// table is may run up to there, and moves the table with it.
   String? stageBootloader(PickedFile file) {
-    final row = bootloaderRow;
-    if (row == null) return 'Pick a chip first: the bootloader offset depends on it';
-    return stageWrite(row, file);
+    final offset = _primaryBootloaderOffset;
+    if (offset == null) return 'Pick a chip first: the bootloader offset depends on it';
+    final int? recorded;
+    try {
+      recorded = partitionTableOffsetOfBootloader(file.bytes);
+    } on IdfToolException catch (e) {
+      return e.message;
+    }
+    final problem = stageWrite(PartitionDefinition.bootloader(offset: offset, size: (recorded ?? _partitionTableOffset) - offset), file);
+    if (problem == null && _fileTable != null) _verifyFileTable();
+    return problem;
+  }
+
+  void _verifyFileTable() {
+    _fileTableProblem = null;
+    try {
+      _fileTable!.verify(partitionTableOffset: partitionTableOffset);
+    } catch (e) {
+      _fileTableProblem = '$e';
+    }
   }
 
   Iterable<PlannedOp> get ops => _ops.values;
@@ -547,7 +608,9 @@ class FlashPlan extends ChangeNotifier {
   }
 
   void unstage(String partitionName) {
-    if (_ops.remove(partitionName) != null) notifyListeners();
+    if (_ops.remove(partitionName) == null) return;
+    if (partitionName == _bootloaderName && _fileTable != null) _verifyFileTable();
+    notifyListeners();
   }
 
   // --------------------------------------------------------------------------
@@ -717,7 +780,8 @@ class FlashPlan extends ChangeNotifier {
       _manual.where((m) => m.warning != null).length +
       (_appWarningText == null ? 0 : 1) +
       (stagedTableProblem == null ? 0 : 1) +
-      (tableSizeProblem == null ? 0 : 1);
+      (tableSizeProblem == null ? 0 : 1) +
+      (tableMoveProblem == null ? 0 : 1);
 
   void clear() {
     _run = null;
@@ -852,15 +916,16 @@ class FlashPlan extends ChangeNotifier {
   /// Stage everything in a bundle. Throws [IdfToolException] for a bad
   /// bundle; returns notes about entries that could not be staged.
   List<String> loadBundle(Uint8List zip, {required String source}) {
+    // A CSV table is laid out for where the bundle's bootloader records it, which is staged first so the table verifies against it.
     final bundle = readBundle(zip, partitionTableOffset: _partitionTableOffset, primaryBootloaderOffset: _primaryBootloaderOffset);
     final notes = <String>[];
+    if (bundle.bootloader case final b?) {
+      if (stageBootloader((name: 'bootloader.bin', bytes: b)) case final problem?) notes.add('bootloader.bin: $problem');
+    }
     if (bundle.table case final t?) {
       _tablePolicy = bundle.manifest?.tablePolicy ?? TablePolicy.update;
       _tableMatch = bundle.manifest?.tableMatch ?? TableMatch.exact;
       notes.addAll(stageTable(t, source: '$source/${bundle.tableFile}'));
-    }
-    if (bundle.bootloader case final b?) {
-      if (stageBootloader((name: 'bootloader.bin', bytes: b)) case final problem?) notes.add('bootloader.bin: $problem');
     }
     for (final (role, bytes) in [(FlashRole.factory, bundle.factoryApp), (FlashRole.ota, bundle.otaApp)]) {
       if (bytes == null) continue;

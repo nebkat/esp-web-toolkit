@@ -10,6 +10,7 @@ import 'nvs/nvs.dart';
 import 'otadata.dart';
 import 'partition_slice.dart';
 import 'partition_table.dart';
+import 'table_offset.dart';
 
 /// An error in what was asked of the device (bad input, missing partition),
 /// as opposed to a protocol failure from the loader.
@@ -28,40 +29,138 @@ typedef ProgressCallback = void Function(String label, int done, int total);
 /// (preferably with the stub running — reads need it on everything but the
 /// original ESP32).
 ///
-/// The partition table is read from flash on first use and cached; supply one
-/// with [usePartitionTable] to work against a table that isn't on the device
-/// yet (a CSV about to be flashed, or a bundle's).
+/// The partition table is where the device's bootloader records it (see
+/// `table_offset.dart`), else at [PartitionTable.defaultOffset], unless an
+/// explicit offset is given; [readPartitionTableOffset] finds it, and the
+/// first read of the table does so if nothing has yet. The table is read
+/// from flash on first use and cached; supply one with [usePartitionTable]
+/// to work against a table that isn't on the device yet (a CSV about to be
+/// flashed, or a bundle's).
 class IdfDevice {
+  /// [partitionTableOffset] overrides where the bootloader records the
+  /// table (python idftool's `--partition-table-offset`). [warn] hears about
+  /// a table read away from where the bootloader records it, or written
+  /// there by force.
   IdfDevice(
     this.loader, {
-    this.partitionTableOffset = PartitionTable.defaultOffset,
+    int? partitionTableOffset,
     this.partitionTableSize = PartitionTable.size,
     int? primaryBootloaderOffset,
-  }) : primaryBootloaderOffset = primaryBootloaderOffset ?? loader.chip?.bootloaderFlashOffset;
+    this.flashSize,
+    this.warn,
+  })  : explicitPartitionTableOffset = partitionTableOffset,
+        _partitionTableOffset = partitionTableOffset ?? PartitionTable.defaultOffset,
+        primaryBootloaderOffset = primaryBootloaderOffset ?? loader.chip?.bootloaderFlashOffset;
+
+  /// Make an [IdfDevice] and find where its partition table is
+  /// ([readPartitionTableOffset]).
+  static Future<IdfDevice> open(
+    EspLoader loader, {
+    int? partitionTableOffset,
+    int partitionTableSize = PartitionTable.size,
+    int? primaryBootloaderOffset,
+    int? flashSize,
+    void Function(String message)? warn,
+  }) async {
+    final device = IdfDevice(loader,
+        partitionTableOffset: partitionTableOffset,
+        partitionTableSize: partitionTableSize,
+        primaryBootloaderOffset: primaryBootloaderOffset,
+        flashSize: flashSize,
+        warn: warn);
+    await device.readPartitionTableOffset();
+    return device;
+  }
 
   final EspLoader loader;
-  final int partitionTableOffset;
   final int partitionTableSize;
+
+  /// The offset the table was asked to be at, overriding the bootloader's
+  /// record; `null` to go by the record.
+  final int? explicitPartitionTableOffset;
+
+  /// The flash size, which bounds the partition table offset a bootloader may
+  /// record; `null` if unknown.
+  final int? flashSize;
+
+  /// Told about a table away from where the bootloader records it.
+  final void Function(String message)? warn;
 
   /// Where the chip's ROM expects the second-stage bootloader; `null` if the
   /// chip is unknown, in which case the virtual `bootloader` entry is absent.
   final int? primaryBootloaderOffset;
+
+  int _partitionTableOffset;
+  int? _recordedPartitionTableOffset;
+  bool _partitionTableOffsetRead = false;
+
+  /// Where the partition table is: [explicitPartitionTableOffset], else where
+  /// the bootloader records it, else ESP-IDF's default. Known once
+  /// [readPartitionTableOffset] has run (the first table read runs it).
+  int get partitionTableOffset => _partitionTableOffset;
+
+  /// Where the device's bootloader records the partition table, as last read;
+  /// `null` if it records none, or it has not been read.
+  int? get recordedPartitionTableOffset => _recordedPartitionTableOffset;
 
   PartitionTable? _table;
   PartitionResolver? _resolver;
 
   EspChip get chip => loader.chip ?? (throw IdfToolException('Loader is not connected to a chip'));
 
+  /// Read where the device's bootloader records the partition table, and so
+  /// [partitionTableOffset]. A bootloader that can't be read (the ROM loader
+  /// reads flash only on the ESP32) or isn't there records nothing. Throws
+  /// [IdfToolException] if it records an offset that can't be a table's.
+  // TODO: experimental while espressif/esp-idf#19102 is unmerged (see table_offset.dart).
+  Future<int?> readPartitionTableOffset() async {
+    final bootloaderOffset = primaryBootloaderOffset;
+    int? recorded;
+    if (bootloaderOffset != null) {
+      try {
+        recorded = await readRecordedPartitionTableOffset(loader, bootloaderOffset, flashSize: flashSize);
+      } on EspUnsupportedCommandException {
+        recorded = null;
+      }
+    }
+    _partitionTableOffsetRead = true;
+    _recordedPartitionTableOffset = recorded;
+    final offset = resolvePartitionTableOffset(recorded);
+    if (offset != _partitionTableOffset) {
+      _partitionTableOffset = offset;
+      _table = null;
+      _resolver = null;
+    }
+    return recorded;
+  }
+
+  /// Where a table the bootloader records at [recorded] goes:
+  /// [explicitPartitionTableOffset], else [recorded], else ESP-IDF's default.
+  /// An explicit offset elsewhere is checked by [checkTableOffset]: with
+  /// [writing], refused unless [force].
+  int resolvePartitionTableOffset(int? recorded, {bool writing = false, bool force = false}) {
+    final explicit = explicitPartitionTableOffset;
+    if (explicit == null) return recorded ?? PartitionTable.defaultOffset;
+    checkTableOffset(explicit, recorded, 'The partition table offset given', writing: writing, force: force, warn: warn);
+    return explicit;
+  }
+
   /// The partition table in use, read from flash if not yet loaded.
   Future<PartitionTable> partitionTable({bool refresh = false}) async {
     if (_table == null || refresh) {
-      final binary = await loader.readFlash(partitionTableOffset, partitionTableSize);
+      if (!_partitionTableOffsetRead) await readPartitionTableOffset();
+      final offset = partitionTableOffset;
+      final binary = await loader.readFlash(offset, partitionTableSize);
+      if (isErased(binary)) {
+        throw IdfToolException('No partition table on the device at ${hex(offset)}: the flash there is erased');
+      }
       final PartitionTable table;
       try {
         table = PartitionTable.fromBinary(binary);
       } on PartitionTableException catch (e) {
-        throw IdfToolException('Partition table could not be loaded from flash at ${hex(partitionTableOffset)}: $e');
+        throw IdfToolException('Partition table could not be loaded from flash at ${hex(offset)}: $e');
       }
+      checkTableRow(table, _recordedPartitionTableOffset, writing: false, warn: warn);
       usePartitionTable(table.requireNotEmpty('the device'));
     }
     return _table!;
@@ -119,11 +218,36 @@ class IdfDevice {
   }
 
   Future<WriteOutcome> _write(
-      int address, Uint8List data, WriteStrategy strategy, ProgressCallback? onProgress, String label) {
-    return writeFlashRegion(loader, address, data,
+      int address, Uint8List data, WriteStrategy strategy, ProgressCallback? onProgress, String label) async {
+    final outcome = await writeFlashRegion(loader, address, data,
         strategy: strategy,
         onProgress: ({required scanned, required written, required total}) =>
             onProgress?.call('Writing $label', written, total));
+    if (address < bootloaderDescriptionsEnd) await _bootloaderWritten();
+    return outcome;
+  }
+
+  /// A write may have replaced the bootloader, and with it where the table
+  /// is. A bootloader that records nothing leaves the offset as it was: it
+  /// doesn't say where its table is, and the table a bundle just wrote for
+  /// it is where it was written.
+  Future<void> _bootloaderWritten() async {
+    final bootloaderOffset = primaryBootloaderOffset;
+    if (bootloaderOffset == null) return;
+    int? recorded;
+    try {
+      recorded = await readRecordedPartitionTableOffset(loader, bootloaderOffset, flashSize: flashSize);
+    } on EspUnsupportedCommandException {
+      return;
+    } on IdfToolException catch (e) {
+      warn?.call('$e');
+      return;
+    }
+    _recordedPartitionTableOffset = recorded;
+    if (recorded == null || explicitPartitionTableOffset != null || recorded == _partitionTableOffset) return;
+    _partitionTableOffset = recorded;
+    _table = null;
+    _resolver = null;
   }
 
   // --------------------------------------------------------------------------
@@ -360,17 +484,33 @@ class IdfDevice {
   // Partition table, whole-flash images, bundles
   // --------------------------------------------------------------------------
 
-  /// Flash [table] at [partitionTableOffset]. Fails verification unless
-  /// [force]; either way this replaces only the map — existing partition
-  /// data is not moved, resized or erased.
-  Future<void> writePartitionTable(PartitionTable table, {bool force = false, int? flashSize}) async {
+  /// Where a table goes for [bootloader], the bootloader that will read it:
+  /// where that records it, else where the device's own records it (see
+  /// [resolvePartitionTableOffset]). [bootloader] is the device's own when
+  /// `null`.
+  ({int offset, int? recorded}) partitionTableOffsetFor({Uint8List? bootloader, bool writing = false, bool force = false}) {
+    final recorded = (bootloader == null ? null : partitionTableOffsetOfBootloader(bootloader)) ?? _recordedPartitionTableOffset;
+    return (offset: resolvePartitionTableOffset(recorded, writing: writing, force: force), recorded: recorded);
+  }
+
+  /// Flash [table] where [bootloader] (the device's own by default; see
+  /// [partitionTableOffsetFor]) will read it, and work against it from then
+  /// on. Fails verification, or a table placed away from where the
+  /// bootloader records it, unless [force]; either way this replaces only
+  /// the map — existing partition data is not moved, resized or erased.
+  Future<void> writePartitionTable(PartitionTable table, {bool force = false, int? flashSize, Uint8List? bootloader}) async {
+    if (!_partitionTableOffsetRead) await readPartitionTableOffset();
+    final (:offset, :recorded) = partitionTableOffsetFor(bootloader: bootloader, writing: true, force: force);
+    checkTableRow(table, recorded, writing: true, force: force, warn: warn);
     try {
-      table.verify(partitionTableOffset: partitionTableOffset);
+      table.verify(partitionTableOffset: offset);
     } on PartitionTableException catch (e) {
       if (!force) throw IdfToolException('Partition table failed verification: $e. Pass force to flash it anyway.');
     }
+    flashSize ??= this.flashSize;
     if (flashSize != null) table.verifySizeFits(flashSize);
-    await loader.writeFlash(partitionTableOffset, table.toBinary());
+    await loader.writeFlash(offset, table.toBinary());
+    _partitionTableOffset = offset;
     usePartitionTable(table);
   }
 
@@ -384,12 +524,17 @@ class IdfDevice {
   }
 
   /// Write a whole-flash [image] (starting at address 0), after checking its
-  /// bootloader targets this chip. With [erase] the entire flash is erased
-  /// first, which makes the result reproducible but forces a full write.
+  /// bootloader targets this chip. Its partition table is where its
+  /// bootloader records it ([partitionTableOffsetOfImage]); one placed
+  /// elsewhere is refused unless [force]. With [erase] the entire flash is
+  /// erased first, which makes the result reproducible but forces a full
+  /// write.
   Future<WriteOutcome> writeImage(Uint8List image,
-      {bool erase = true, WriteStrategy strategy = WriteStrategy.differential, ProgressCallback? onProgress}) async {
+      {bool erase = true, bool force = false, WriteStrategy strategy = WriteStrategy.differential, ProgressCallback? onProgress}) async {
     if (image.isEmpty) throw IdfToolException('Image is empty');
     final bootloaderOffset = primaryBootloaderOffset ?? 0;
+    final recorded = partitionTableOffsetOfImage(image);
+    final partitionTableOffset = resolvePartitionTableOffset(recorded, writing: true, force: force);
     if (image.length <= partitionTableOffset) {
       throw IdfToolException('Image (${hex(image.length)} bytes) is smaller than the partition table offset '
           '${hex(partitionTableOffset)}; it does not appear to contain a partition table');
@@ -402,9 +547,14 @@ class IdfDevice {
       throw IdfToolException('Chip ID mismatch: attempting to flash ${bootloader.header.chipId?.name ?? 'unknown-chip'} '
           'image to ${chip.name} device');
     }
-    usePartitionTable(PartitionTable.fromBinary(
-            Uint8List.sublistView(image, partitionTableOffset, partitionTableOffset + partitionTableSize))
-        .requireNotEmpty('the image'));
+    final tableBinary = Uint8List.sublistView(image, partitionTableOffset, (partitionTableOffset + partitionTableSize).clamp(0, image.length));
+    if (isErased(tableBinary)) {
+      throw IdfToolException('No partition table in the image at ${hex(partitionTableOffset)}: the flash there is erased');
+    }
+    final table = PartitionTable.fromBinary(tableBinary).requireNotEmpty('the image');
+    checkTableRow(table, recorded, writing: true, force: force, warn: warn);
+    _partitionTableOffset = partitionTableOffset;
+    usePartitionTable(table);
     if (erase) {
       await loader.eraseFlash();
       strategy = WriteStrategy.always;
@@ -433,22 +583,29 @@ class IdfDevice {
 
   /// Flash every `<partition>.bin` in a bundle ZIP, and its partition table
   /// if `partition_table.csv` is present (the bundle's table is then used to
-  /// resolve the partitions).
+  /// resolve the partitions). The table goes where the bundle's
+  /// `bootloader.bin` records it, else where the device's bootloader does
+  /// ([partitionTableOffsetFor]); one placed elsewhere by its own
+  /// `partition_table` row is refused unless [force].
   Future<Map<String, WriteOutcome>> writeBundle(Uint8List zip,
-      {WriteStrategy strategy = WriteStrategy.differential, ProgressCallback? onProgress}) async {
+      {bool force = false, WriteStrategy strategy = WriteStrategy.differential, ProgressCallback? onProgress}) async {
     final Archive archive;
     try {
       archive = ZipDecoder().decodeBytes(zip, verify: true);
     } catch (e) {
       throw IdfToolException('Bundle is not a valid ZIP archive: $e');
     }
+    if (!_partitionTableOffsetRead) await readPartitionTableOffset();
     final csv = archive.find('partition_table.csv');
     if (csv != null) {
+      final (:offset, :recorded) = partitionTableOffsetFor(bootloader: archive.find('bootloader.bin')?.readBytes(), writing: true, force: force);
       final table = PartitionTable.fromCsv(
         PartitionTable.decodeCsv(csv.readBytes()!),
-        partitionTableOffset: partitionTableOffset,
+        partitionTableOffset: offset,
         primaryBootloaderOffset: primaryBootloaderOffset,
       ).requireNotEmpty('the bundle');
+      checkTableRow(table, recorded, writing: true, force: force, warn: warn);
+      _partitionTableOffset = offset;
       usePartitionTable(table);
     }
     final r = await resolver();

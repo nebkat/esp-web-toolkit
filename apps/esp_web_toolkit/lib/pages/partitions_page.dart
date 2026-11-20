@@ -51,14 +51,14 @@ class _PartitionsPageState extends State<PartitionsPage> {
       table = PartitionTable.isBinary(file.bytes)
           ? PartitionTable.fromBinary(file.bytes)
           : parsePartitionTableCsv(PartitionTable.decodeCsv(file.bytes),
-              source: file.name, partitionTableOffset: plan.partitionTableOffset, primaryBootloaderOffset: plan.primaryBootloaderOffset);
+              source: file.name, partitionTableOffset: plan.deviceTableOffset, primaryBootloaderOffset: plan.primaryBootloaderOffset);
     } catch (e) {
       session.addLog('Could not parse ${file.name}: $e', error: true);
       return;
     }
     String? problem;
     try {
-      table.verify(partitionTableOffset: plan.partitionTableOffset);
+      table.verify(partitionTableOffset: plan.deviceTableOffset);
     } catch (e) {
       problem = '$e';
     }

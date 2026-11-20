@@ -8,6 +8,7 @@ import 'package:esptool/esptool.dart';
 import 'int_literal.dart';
 import 'otadata.dart';
 import 'partition_table.dart';
+import 'table_offset.dart';
 
 /// The app descriptor of [image] (which must have one), one field per line.
 String formatAppInfo(ImageMetadata image, {String indent = ''}) {
@@ -24,9 +25,20 @@ String formatAppInfo(ImageMetadata image, {String indent = ''}) {
   ].join('\n');
 }
 
+/// A bootloader's description, one field per line, with where it records
+/// the partition table.
+String formatBootloaderInfo(BootloaderDescription d, {String indent = ''}) => [
+      '${indent}Version:          ${d.version}',
+      '${indent}IDF version:      ${d.idfVersion}',
+      '${indent}Secure version:   ${d.secureVersion}',
+      '${indent}Compiled:         ${d.dateTime}',
+      '${indent}Partition table:  ${d.partitionTableOffset == 0 ? 'not recorded (0x8000 by default)' : '${hex(d.partitionTableOffset)} ($recordedTableOffsetNote)'}',
+    ].join('\n');
+
 /// An ESP image's header and segments, plus its app descriptor if it is an
-/// application (a bootloader has none).
-String formatImageInfo(ImageMetadata image) {
+/// application, or its bootloader description if it is a bootloader that
+/// has one ([bytes], the image itself, are needed for that).
+String formatImageInfo(ImageMetadata image, {Uint8List? bytes}) {
   final h = image.header;
   final out = StringBuffer()
     ..writeln('Chip:             ${h.chipId?.name ?? 'unknown'}')
@@ -42,6 +54,13 @@ String formatImageInfo(ImageMetadata image) {
       ..writeln()
       ..writeln('App descriptor:')
       ..write(formatAppInfo(image, indent: '  '));
+  } else if (bytes != null) {
+    if (BootloaderDescription.fromImageOrNull(bytes) case final d?) {
+      out
+        ..writeln()
+        ..writeln('Bootloader description:')
+        ..write(formatBootloaderInfo(d, indent: '  '));
+    }
   }
   return out.toString().trimRight();
 }

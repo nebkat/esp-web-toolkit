@@ -199,7 +199,7 @@ class _OneClickPageState extends State<OneClickPage> {
     _checkStarted = true;
     final check = await session.runDevice(
         'Check the device',
-        (device) async => checkBundle(bundle, await readDeviceTable(device), flashSize: session.flashSize));
+        (device) => checkBundleOnDevice(device, bundle, flashSize: session.flashSize));
     if (mounted && identical(bundle, _bundle)) setState(() => _check = check);
   }
 

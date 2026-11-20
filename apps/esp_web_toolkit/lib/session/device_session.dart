@@ -342,10 +342,19 @@ class DeviceSession extends ChangeNotifier {
       }
       chip = detected;
       flashSize = await loader.attachFlash();
-      final device = IdfDevice(loader);
+      if (useStub) {
+        await loader.runStub();
+      }
+      final device = IdfDevice(loader, flashSize: flashSize, warn: (message) => addLog(message, error: true));
       _device = device;
       _layoutAttempted = false;
       _efusesAttempted = false;
+      // The bootloader says where the partition table is (espressif/esp-idf#19102); without the stub only the ESP32 can read flash.
+      try {
+        if (await device.readPartitionTableOffset() case final recorded?) addLog('The bootloader reads the partition table at ${hex(recorded)} ($recordedTableOffsetNote)');
+      } on IdfToolException catch (e) {
+        addLog('$e; looking for the partition table at ${hex(device.partitionTableOffset)}', error: true);
+      }
       for (final note in plan.attach(
         chip: detected,
         partitionTableOffset: device.partitionTableOffset,
@@ -354,9 +363,6 @@ class DeviceSession extends ChangeNotifier {
         flashSize: flashSize,
       )) {
         addLog(note, error: true);
-      }
-      if (useStub) {
-        await loader.runStub();
       }
       mac = await loader.readMac();
       if (port != null) identities[port] = PortIdentity(chip: detected, mac: macString);

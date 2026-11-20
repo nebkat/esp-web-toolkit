@@ -114,7 +114,9 @@ class _FlashPageState extends State<FlashPage> {
     final problem = plan.stageBootloader(file);
     if (problem != null) return session.addLog(problem, error: true);
     final op = plan.bootloaderOp!;
-    session.addLog('Planned: write ${file.name} as the bootloader at ${op.partition.offset.hex}${op.warning == null ? '' : ' — ${op.warning}'}');
+    final reads = plan.bootloaderTableOffset == null ? '' : '; it reads the partition table at ${plan.bootloaderTableOffset!.hex} ($recordedTableOffsetNote)';
+    session.addLog('Planned: write ${file.name} as the bootloader at ${op.partition.offset.hex}$reads${op.warning == null ? '' : ' — ${op.warning}'}');
+    if (plan.tableMoveProblem case final problem?) session.addLog(problem, error: true);
   }
 
   void _stageApp(PickedFile file, {FlashRole? role}) {
@@ -327,6 +329,7 @@ class _FlashPageState extends State<FlashPage> {
       }
     }
     if (plan.tableSizeProblem case final problem?) return session.addLog('Not flashing: $problem', error: true);
+    if (plan.tableMoveProblem case final problem?) return session.addLog('Not flashing: $problem', error: true);
     final table = plan.stagedTableMatches ? null : plan.stagedTable;
     final bootloader = plan.bootloaderOp;
     final app = plan.app;
@@ -386,8 +389,11 @@ class _FlashPageState extends State<FlashPage> {
         if (tableStep != null) {
           await step(tableStep, () async {
             if (table == null) return 'already matches the device, not written';
-            await device.writePartitionTable(table, force: true, flashSize: session.flashSize);
-            return 'written';
+            final forBootloader = bootloader?.file?.bytes;
+            // Verification failures were shown in the plan and flashed anyway; a table the bootloader would not find is still refused.
+            checkTableRow(table, device.partitionTableOffsetFor(bootloader: forBootloader).recorded, writing: true);
+            await device.writePartitionTable(table, force: true, flashSize: session.flashSize, bootloader: forBootloader);
+            return 'written at ${device.partitionTableOffset.hex}';
           });
         }
         if (bootloader != null) {
@@ -788,7 +794,8 @@ class _FlashPageState extends State<FlashPage> {
         description: Text(
             row == null
                 ? 'Pick a chip to know the bootloader offset'
-                : 'Written at ${row.offset.hex}, the ${plan.chip?.name ?? 'chip'}\'s bootloader offset, regardless of the partition table',
+                : 'Written at ${row.offset.hex}, the ${plan.chip?.name ?? 'chip'}\'s bootloader offset, regardless of the partition table'
+                    '${plan.bootloaderTableOffset == null ? '' : '; it reads the partition table at ${plan.bootloaderTableOffset!.hex} ($recordedTableOffsetNote)'}',
             style: TextStyle(color: scheme.outline)),
         planned: op?.summary,
         warning: op?.warning,
@@ -1142,7 +1149,7 @@ class _PlanPanel extends StatelessWidget {
                   name: 'bootloader',
                   detail: bootloader.partition.offset.hex,
                   summary: bootloader.summary,
-                  warning: bootloader.warning,
+                  warning: bootloader.warning ?? plan.tableMoveProblem,
                   onRemove: () => onRemove(bootloader.partition.name)),
             if (plan.app case final app?)
               tile(

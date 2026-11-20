@@ -61,16 +61,19 @@ class Inspected {
 }
 
 /// Work out what [file] is and describe it. Nothing here needs a device;
-/// the partition table is assumed at its default offset.
+/// the partition table is where the file's bootloader records it, else at
+/// its default offset.
 Future<Inspected> inspectFile(PickedFile file) async {
   final bytes = file.bytes;
-  const tableOffset = PartitionTable.defaultOffset;
   const tableSize = PartitionTable.size;
 
   if (bytes.length >= 4 && bytes[0] == 0x50 && bytes[1] == 0x4B && bytes[2] == 0x03 && bytes[3] == 0x04) {
     final archive = ZipDecoder().decodeBytes(bytes, verify: true);
     final csv = archive.find('partition_table.csv');
     if (csv != null) {
+      final bootloader = archive.find('bootloader.bin')?.readBytes();
+      final recorded = bootloader == null ? null : partitionTableOffsetOfBootloader(bootloader);
+      final tableOffset = recorded ?? PartitionTable.defaultOffset;
       final table = parsePartitionTableCsv(PartitionTable.decodeCsv(csv.readBytes()!), source: '${file.name}/partition_table.csv', partitionTableOffset: tableOffset);
       Future<Uint8List> read(int offset, int length) async {
         final p = table.where((p) => p.offset == offset).firstOrNull;
@@ -87,11 +90,12 @@ Future<Inspected> inspectFile(PickedFile file) async {
       return Inspected(
         kind: FileKind.bundle,
         file: file,
-        summary: '${bins.length} partition image${bins.length == 1 ? '' : 's'}: ${bins.join(', ')}',
+        summary: '${bins.length} partition image${bins.length == 1 ? '' : 's'}: ${bins.join(', ')}'
+            '${recorded == null ? '' : '; its bootloader reads the partition table at ${recorded.hex} ($recordedTableOffsetNote)'}',
         report: await formatTableWithApps(table, read),
         table: table,
         archive: archive,
-        problem: _verify(table),
+        problem: _verify(table, tableOffset),
       );
     }
     final files = archive.files.where((f) => f.isFile).toList();
@@ -118,7 +122,7 @@ Future<Inspected> inspectFile(PickedFile file) async {
         report: lines.take(200).join('\n') + (lines.length > 200 ? '\n… ${lines.length - 200} more lines' : ''),
       );
     }
-    final table = parsePartitionTableCsv(text, source: file.name, partitionTableOffset: tableOffset);
+    final table = parsePartitionTableCsv(text, source: file.name);
     return _tableResult(file, table, FileKind.partitionTable);
   }
 
@@ -154,6 +158,16 @@ Future<Inspected> inspectFile(PickedFile file) async {
     );
   }
 
+  // A flash image: its table is where its bootloader records it, else at 0x8000.
+  final chip = _bootloaderChip(bytes);
+  int? recorded;
+  String? recordProblem;
+  try {
+    recorded = partitionTableOffsetOfImage(bytes);
+  } on IdfToolException catch (e) {
+    recordProblem = e.message;
+  }
+  final tableOffset = recorded ?? PartitionTable.defaultOffset;
   if (bytes.length > tableOffset + tableSize) {
     PartitionTable? table;
     try {
@@ -162,7 +176,6 @@ Future<Inspected> inspectFile(PickedFile file) async {
       // not a flash image
     }
     if (table != null) {
-      final chip = _bootloaderChip(bytes, tableOffset);
       Future<Uint8List> read(int offset, int length) async {
         final out = Uint8List(length)..fillRange(0, length, 0xFF);
         if (offset < bytes.length) out.setRange(0, length.clamp(0, bytes.length - offset), bytes, offset);
@@ -171,23 +184,27 @@ Future<Inspected> inspectFile(PickedFile file) async {
 
       final report = StringBuffer();
       if (chip != null) {
-        final bl = ImageMetadata.fromBytes(Uint8List.sublistView(bytes, chip.bootloaderFlashOffset, tableOffset));
+        final blBytes = Uint8List.sublistView(bytes, chip.bootloaderFlashOffset, tableOffset);
+        final bl = ImageMetadata.fromBytes(blBytes);
         report
           ..writeln('Bootloader at ${chip.bootloaderFlashOffset.hex}:')
-          ..writeln(formatImageInfo(bl).split('\n').map((l) => '  $l').join('\n'))
+          ..writeln(formatImageInfo(bl, bytes: blBytes).split('\n').map((l) => '  $l').join('\n'))
           ..writeln();
       } else {
-        report.writeln('No bootloader recognised at 0x0 or 0x1000.\n');
+        report.writeln('No bootloader recognised at ${bootloaderOffsets.map((o) => o.hex).join(' or ')}.\n');
       }
+      if (recordProblem != null) report.writeln('Warning: $recordProblem; reading the partition table at ${tableOffset.hex}\n');
+      report.writeln('Partition table at ${tableOffset.hex}${recorded == null ? '' : ', where the bootloader records it ($recordedTableOffsetNote)'}:\n');
       report.write(await formatTableWithApps(table, read));
       return Inspected(
         kind: FileKind.flashImage,
         file: file,
-        summary: '${bytes.length.bytesString}, ${table.length} partitions${chip == null ? '' : ', ${chip.name} bootloader'}',
+        summary: '${bytes.length.bytesString}, ${table.length} partitions${chip == null ? '' : ', ${chip.name} bootloader'}'
+            '${recorded == null ? '' : ', partition table at ${recorded.hex} ($recordedTableOffsetNote)'}',
         report: report.toString(),
         table: table,
         bootloader: chip,
-        problem: _verify(table),
+        problem: _verify(table, tableOffset),
       );
     }
   }
@@ -195,13 +212,15 @@ Future<Inspected> inspectFile(PickedFile file) async {
   if (bytes.isNotEmpty && bytes[0] == ImageHeader.magic) {
     final image = ImageMetadata.fromBytes(bytes);
     final app = image.appDescription;
+    final description = app == null ? BootloaderDescription.fromImageOrNull(bytes) : null;
+    final reads = (description?.partitionTableOffset ?? 0) == 0 ? '' : ', reads the partition table at ${description!.partitionTableOffset.hex} ($recordedTableOffsetNote)';
     return Inspected(
       kind: app == null ? FileKind.bootloaderImage : FileKind.appImage,
       file: file,
       summary: app == null
-          ? '${image.header.chipId?.name ?? 'unknown chip'}, ${image.segments.length} segments, ${bytes.length.bytesString}'
+          ? '${image.header.chipId?.name ?? 'unknown chip'}, ${image.segments.length} segments, ${bytes.length.bytesString}$reads'
           : '${app.projectName} ${app.version} for ${image.header.chipId?.name ?? 'unknown chip'}, IDF ${app.idfVersion}, ${bytes.length.bytesString}',
-      report: formatImageInfo(image),
+      report: formatImageInfo(image, bytes: bytes),
     );
   }
 
@@ -239,9 +258,9 @@ Inspected _tableResult(PickedFile file, PartitionTable table, FileKind kind) => 
       problem: _verify(table),
     );
 
-String? _verify(PartitionTable table) {
+String? _verify(PartitionTable table, [int tableOffset = PartitionTable.defaultOffset]) {
   try {
-    table.verify(partitionTableOffset: PartitionTable.defaultOffset);
+    table.verify(partitionTableOffset: tableOffset);
     return null;
   } catch (e) {
     return '$e';
@@ -250,10 +269,10 @@ String? _verify(PartitionTable table) {
 
 /// The chip whose bootloader sits at the start of [image], if the bytes at
 /// that chip's bootloader offset parse as an image built for it.
-EspChip? _bootloaderChip(Uint8List image, int tableOffset) {
-  for (final offset in EspChip.values.map((c) => c.bootloaderFlashOffset).toSet()) {
-    if (offset >= tableOffset) continue;
-    final meta = ImageMetadata.fromBytesOrNull(Uint8List.sublistView(image, offset, tableOffset));
+EspChip? _bootloaderChip(Uint8List image) {
+  for (final offset in bootloaderOffsets) {
+    if (offset >= image.length) continue;
+    final meta = ImageMetadata.fromBytesOrNull(Uint8List.sublistView(image, offset));
     final chipId = meta?.header.chipId?.value;
     if (chipId == null) continue;
     final chip = EspChip.values.where((c) => c.imageChipId == chipId && c.bootloaderFlashOffset == offset).firstOrNull;

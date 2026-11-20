@@ -2,7 +2,7 @@
 
 Each version is published at `https://nebkat.github.io/esp-web-toolkit/vX.Y.Z/`.
 
-## Unreleased
+## 0.7.0-beta.1 — 2026-11-20 (beta)
 
 - Experimental: the partition table is read where the bootloader records it, in the `partition_table_offset` field proposed in [espressif/esp-idf#19102](https://github.com/espressif/esp-idf/pull/19102), not yet in ESP-IDF; stock bootloaders record nothing and keep 0x8000. This covers the connected device, flash images and bundles on the Inspect page, and a bundle's or plan's own bootloader. A bootloader that moves the table always gets its table written where it looks, and a flash that has no table to put there is refused.
 

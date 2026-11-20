@@ -19,7 +19,7 @@
 
     var params = new URLSearchParams(location.search);
     var path = location.pathname.indexOf(SITE) === 0 ? location.pathname.slice(SITE.length) : '';
-    var match = /^(v\d+\.\d+\.\d+)(\/.*)?$/.exec(path);
+    var match = /^(v\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)(\/.*)?$/.exec(path);
     var route = match ? match[2] || '/' : '/' + path;
     // Already redirected once (no such version), or a missing file: stop here.
     if (!params.has('p') && !/\.[a-z0-9]+$/i.test(route)) {

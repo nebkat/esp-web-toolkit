@@ -10,6 +10,9 @@
 # The branch root holds apps/esp_web_toolkit/pages: 404.html sends deep links
 # (/v1.2.3/oneclick) to their version, and unversioned links, with their
 # query and fragment, to the latest published version.
+#
+# A prerelease (esp_web_toolkit/v1.2.3-beta.1) is published the same way at
+# its own folder, but never becomes the latest: only a link naming it opens it.
 name: Pages
 
 on:
@@ -33,7 +36,7 @@ jobs:
         name: Version and Flutter from the repository
         run: |
           version="${GITHUB_REF_NAME#esp_web_toolkit/}"
-          pubspec="v$(sed -n 's/^version: *\([0-9]*\.[0-9]*\.[0-9]*\).*/\1/p' apps/esp_web_toolkit/pubspec.yaml)"
+          pubspec="v$(sed -n 's/^version: *\([0-9]*\.[0-9]*\.[0-9]*[^+ ]*\).*/\1/p' apps/esp_web_toolkit/pubspec.yaml)"
           if [ "$version" != "$pubspec" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match apps/esp_web_toolkit/pubspec.yaml ($pubspec)"
             exit 1
@@ -68,8 +71,8 @@ jobs:
           cp -R apps/esp_web_toolkit/build/web "$site/$VERSION"
           rm -rf "$site/$VERSION/canvaskit"
           cp apps/esp_web_toolkit/pages/index.html apps/esp_web_toolkit/pages/404.html "$site/"
-          # The highest version published, not necessarily this one.
-          latest=$(cd "$site" && ls -d v*/ | tr -d / | sort -V | tail -n 1)
+          # The highest version published, not necessarily this one; never a prerelease.
+          latest=$(cd "$site" && ls -d v*/ | tr -d / | grep -vF -e '-' | sort -V | tail -n 1)
           sed -i "s/%LATEST%/$latest/g" "$site/index.html" "$site/404.html"
           touch "$site/.nojekyll"
           cd "$site"
